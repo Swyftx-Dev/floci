@@ -1540,6 +1540,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public List<ManagedPrefixList> describeManagedPrefixLists(String region, List<String> prefixListIds,
                                                               Map<String, List<String>> filters) {
         List<ManagedPrefixList> all = new ArrayList<>(awsManagedPrefixLists(region));
+        // Not a gateway endpoint list, so DescribePrefixLists leaves it out, as on AWS.
+        all.add(awsManagedPrefixList(region, "pl-0a1b2c3d4e5f60718", "com.amazonaws." + region + ".vpc-lattice",
+                List.of("169.254.171.0/24")));
         managedPrefixLists.scan(k -> true).stream()
                 .filter(list -> region.equals(list.getRegion()))
                 .forEach(all::add);

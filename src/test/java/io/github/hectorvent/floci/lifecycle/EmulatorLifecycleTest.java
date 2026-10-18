@@ -41,6 +41,7 @@ import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.redshift.RedshiftDynamoDbZeroEtlConsumer;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import io.github.hectorvent.floci.services.timestreaminfluxdb.TimestreamInfluxDbService;
+import io.github.hectorvent.floci.services.vpclattice.VpcLatticeService;
 import io.quarkus.runtime.Quarkus;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.ShutdownEvent;
@@ -93,6 +94,7 @@ class EmulatorLifecycleTest {
     @Mock private EmulatorConfig.EksServiceConfig eksServiceConfig;
     @Mock private EmulatorConfig.ElbV2ServiceConfig elbv2ServiceConfig;
     @Mock private EmulatorConfig.ElbServiceConfig elbServiceConfig;
+    @Mock private EmulatorConfig.VpcLatticeServiceConfig vpcLatticeServiceConfig;
     @Mock private IamService iamService;
     @Mock private EmulatorConfig.ElastiCacheServiceConfig elastiCacheServiceConfig;
     @Mock private ElastiCacheService elastiCacheService;
@@ -114,6 +116,7 @@ class EmulatorLifecycleTest {
     @Mock private EmulatorConfig.TimestreamInfluxDbServiceConfig timestreamInfluxDbServiceConfig;
     @Mock private ElbV2Service elbV2Service;
     @Mock private ElbClassicService elbClassicService;
+    @Mock private VpcLatticeService vpcLatticeService;
     @Mock private EcsService ecsService;
     @Mock private EksService eksService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
@@ -153,6 +156,8 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(elastiCacheServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.elb()).thenReturn(elbServiceConfig);
         Mockito.lenient().when(elbServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.vpclattice()).thenReturn(vpcLatticeServiceConfig);
+        Mockito.lenient().when(vpcLatticeServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.lambda()).thenReturn(lambdaServiceConfig);
         Mockito.lenient().when(lambdaServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.eks()).thenReturn(eksServiceConfig);
@@ -173,7 +178,7 @@ class EmulatorLifecycleTest {
                 memoryDbContainerManager, memoryDbProxyManager,
                 docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
                 rabbitMqManager, flinkContainerManager, rdsService, timestreamInfluxDbService,
-                elbV2Service, elbClassicService, ecsService,
+                elbV2Service, elbClassicService, vpcLatticeService, ecsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecsTaskRoleCredentialsServer, ecrRegistryManager, flociUiManager, initLifecycleState,
                 schemaCreationWorker, stepFunctionsService, durableExecutionService, containerTeardowns,

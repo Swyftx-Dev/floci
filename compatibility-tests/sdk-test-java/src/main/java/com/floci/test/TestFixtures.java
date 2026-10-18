@@ -166,6 +166,7 @@ import software.amazon.awssdk.services.swf.SwfClient;
 import software.amazon.awssdk.services.timestreaminfluxdb.TimestreamInfluxDbClient;
 import software.amazon.awssdk.services.transfer.TransferClient;
 import software.amazon.awssdk.services.verifiedpermissions.VerifiedPermissionsClient;
+import software.amazon.awssdk.services.vpclattice.VpcLatticeClient;
 import software.amazon.awssdk.services.wafv2.Wafv2Client;
 
 import javax.net.ssl.SSLContext;
@@ -1686,6 +1687,14 @@ public final class TestFixtures {
 
     public static OamClient oamClient() {
         return OamClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static VpcLatticeClient vpcLatticeClient() {
+        return VpcLatticeClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

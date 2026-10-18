@@ -799,6 +799,7 @@ public interface EmulatorConfig {
         BedrockAgentCoreServiceConfig bedrockAgentCore();
         ElbServiceConfig elb();
         ElbV2ServiceConfig elbv2();
+        VpcLatticeServiceConfig vpclattice();
         CodeBuildServiceConfig codebuild();
         CodeDeployServiceConfig codedeploy();
         CodePipelineServiceConfig codepipeline();
@@ -3627,6 +3628,15 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
+        @WithDefault("false")
+        boolean mock();
+    }
+
+    interface VpcLatticeServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** When true, only the control plane runs: no listener ports, health checks, proxying or custom-domain DNS. */
         @WithDefault("false")
         boolean mock();
     }

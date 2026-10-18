@@ -381,6 +381,9 @@ public class AcmJsonHandler {
         if (cert.getIssuer() != null) {
             node.put("Issuer", cert.getIssuer());
         }
+        if (cert.getCertAuthorityArn() != null) {
+            node.put("CertificateAuthorityArn", cert.getCertAuthorityArn());
+        }
 
         if (cert.getCreatedAt() != null) {
             node.put("CreatedAt", cert.getCreatedAt().toEpochMilli() / 1000.0);

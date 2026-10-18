@@ -54,6 +54,11 @@ When `mock` is set to `false` (default), Floci uses the Docker API to start a Re
     - Floci in a container: the broker has two listeners. `internal` (9092) advertises `<container-name>:9092` for containers on the same Docker network. `host` (9093) is published on a host port from the `kafka-host-port` range and advertised as `<bootstrap-hostname or localhost>:<port>` for clients on the Docker host. `GetBootstrapBrokers` returns the Docker-network address. When `FLOCI_SERVICES_MSK_BOOTSTRAP_HOSTNAME` is set, it returns both listeners, `<container-name>:9092,<hostname>:<port>`: a client connects through whichever entry it can reach, and the broker then advertises that listener's address. The two entries are two listeners on the same broker, not two brokers.
 - **Persistence**: Each cluster gets a named Docker volume (`floci-msk-{volumeId}`). In memory mode the volume is removed on cluster delete; in persistent modes it is retained unless `FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE=true`.
 - **Readiness**: The cluster state transitions to `ACTIVE` once the Redpanda `/ready` endpoint is reachable.
+- **Restart**: with persistent storage, every cluster's broker is started again when Floci starts, on
+  the same volume, so its topics and offsets survive; a broker container left behind by a killed
+  Floci is replaced. The cluster reports `CREATING` until the broker is ready, then `ACTIVE`, and the
+  TLS/IAM listeners and broker DNS names come back under the same names. Topics created through
+  `CreateTopic` are created again if the volume lost them.
 
 ## TLS and IAM listeners
 

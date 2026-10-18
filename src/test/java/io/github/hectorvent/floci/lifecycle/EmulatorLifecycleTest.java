@@ -105,6 +105,8 @@ class EmulatorLifecycleTest {
     @Mock private io.github.hectorvent.floci.services.elbv2.ElbV2Service elbV2Service;
     @Mock private io.github.hectorvent.floci.services.elb.ElbClassicService elbClassicService;
     @Mock private io.github.hectorvent.floci.services.vpclattice.VpcLatticeService vpcLatticeService;
+    @Mock private io.github.hectorvent.floci.services.msk.MskService mskService;
+    @Mock private EmulatorConfig.MskServiceConfig mskServiceConfig;
     @Mock private EcsService ecsService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
     @Mock private SqsEventSourcePoller sqsPoller;
@@ -145,6 +147,8 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(elbServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.vpclattice()).thenReturn(vpcLatticeServiceConfig);
         Mockito.lenient().when(vpcLatticeServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.msk()).thenReturn(mskServiceConfig);
+        Mockito.lenient().when(mskServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.lambda()).thenReturn(lambdaServiceConfig);
         Mockito.lenient().when(lambdaServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.eks()).thenReturn(eksServiceConfig);
@@ -165,7 +169,7 @@ class EmulatorLifecycleTest {
                 memoryDbContainerManager, memoryDbProxyManager,
                 docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
                 rabbitMqManager, flinkContainerManager, rdsService, timestreamInfluxDbService,
-                elbV2Service, elbClassicService, vpcLatticeService, ecsService,
+                elbV2Service, elbClassicService, vpcLatticeService, mskService, ecsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecsTaskRoleCredentialsServer, ecrRegistryManager, flociUiManager, initLifecycleState,
                 schemaCreationWorker, stepFunctionsService, durableExecutionService, containerTeardowns,

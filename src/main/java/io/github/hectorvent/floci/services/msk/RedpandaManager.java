@@ -261,6 +261,20 @@ public class RedpandaManager {
      * Runs {@code rpk} in the cluster's broker, for the topic operations MSK exposes over its API.
      * A broker of one node holds one replica of everything, whatever factor was asked for.
      */
+    /** As {@link #rpk}, for a restore that expects most of what it asks for to exist already. */
+    public void rpkQuietly(MskCluster cluster, List<String> args) {
+        if (cluster.getContainerId() == null) {
+            return;
+        }
+        List<String> cmd = new ArrayList<>();
+        cmd.add("rpk");
+        cmd.addAll(args);
+        ContainerExec.Result result = ContainerExec.runMerged(lifecycleManager.getDockerClient(),
+                cluster.getContainerId(), cmd.toArray(String[]::new), 30);
+        LOG.debugv("rpk {0} on MSK cluster {1}: {2}", String.join(" ", args), cluster.getClusterName(),
+                result.stdout());
+    }
+
     public void rpk(MskCluster cluster, List<String> args) {
         if (cluster.getContainerId() == null) {
             return;

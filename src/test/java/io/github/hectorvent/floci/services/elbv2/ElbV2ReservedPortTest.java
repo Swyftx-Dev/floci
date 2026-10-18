@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.config.TlsProxyServer;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver.CertificateMaterial;
 import io.github.hectorvent.floci.core.common.Pem;
+import io.github.hectorvent.floci.core.common.port.SharedHttpPorts;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
@@ -21,6 +22,7 @@ import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
 import io.vertx.core.net.SSLOptions;
+import io.vertx.core.net.SocketAddress;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -56,6 +58,14 @@ import static org.mockito.Mockito.when;
  */
 class ElbV2ReservedPortTest {
 
+    /** A shared socket that binds at once and frees the port at once. */
+    private static SharedHttpPorts sharedHttpPorts() {
+        SharedHttpPorts ports = mock(SharedHttpPorts.class);
+        when(ports.attachBackend(anyInt(), any(), anyInt())).thenReturn(Future.succeededFuture());
+        when(ports.detachBackend(anyInt(), any())).thenReturn(Future.succeededFuture());
+        return ports;
+    }
+
     private static ElbV2DataPlane dataPlaneWith(int flociPort, boolean tlsEnabled, int awsHttpsPort) {
         EmulatorConfig.TlsConfig tls = mock(EmulatorConfig.TlsConfig.class);
         when(tls.enabled()).thenReturn(tlsEnabled);
@@ -72,6 +82,7 @@ class ElbV2ReservedPortTest {
                 tlsEnabled && awsHttpsPort > 0 && (int) inv.getArgument(0) == awsHttpsPort);
 
         ElbV2DataPlane dataPlane = new ElbV2DataPlane();
+        dataPlane.sharedHttpPorts = sharedHttpPorts();
         dataPlane.config = config;
         dataPlane.tlsProxyServer = proxy;
         return dataPlane;
@@ -136,11 +147,12 @@ class ElbV2ReservedPortTest {
         HttpServer server = mock(HttpServer.class);
         when(server.requestHandler(any())).thenReturn(server);
         // Left uncompleted: the listen outcome is not what this test is about.
-        when(server.listen()).thenReturn(Promise.<HttpServer>promise().future());
+        when(server.listen(any(SocketAddress.class))).thenReturn(Promise.<HttpServer>promise().future());
         Vertx vertx = mock(Vertx.class);
         when(vertx.createHttpServer(any(HttpServerOptions.class))).thenReturn(server);
 
         ElbV2DataPlane dataPlane = new ElbV2DataPlane();
+        dataPlane.sharedHttpPorts = sharedHttpPorts();
         dataPlane.config = config;
         dataPlane.tlsProxyServer = proxy;
         dataPlane.vertx = vertx;
@@ -175,7 +187,7 @@ class ElbV2ReservedPortTest {
         dataPlane.certificateResolver = mock(CertificateReferenceResolver.class);
         HttpServer server = mock(HttpServer.class);
         when(server.requestHandler(any())).thenReturn(server);
-        when(server.listen()).thenReturn(Future.succeededFuture(server));
+        when(server.listen(any(SocketAddress.class))).thenReturn(Future.succeededFuture(server));
         when(server.close()).thenReturn(Future.succeededFuture());
         when(dataPlane.vertx.createHttpServer(any(HttpServerOptions.class))).thenReturn(server);
         String region = "us-west-2";
@@ -235,7 +247,7 @@ class ElbV2ReservedPortTest {
         HttpServer newServer = mock(HttpServer.class);
         for (HttpServer server : List.of(oldServer, newServer)) {
             when(server.requestHandler(any())).thenReturn(server);
-            when(server.listen()).thenReturn(Future.succeededFuture(server));
+            when(server.listen(any(SocketAddress.class))).thenReturn(Future.succeededFuture(server));
             when(server.close()).thenReturn(Future.succeededFuture());
         }
         when(dataPlane.vertx.createHttpServer(any(HttpServerOptions.class)))
@@ -284,7 +296,7 @@ class ElbV2ReservedPortTest {
             assertEquals(Pem.parseCertificate(survivorCertificate.certificatePem()),
                     servedCertificate(initial.getValue(), "moved.example.test"),
                     "the old port must fall back to its survivor after the other certificate moves away");
-            verify(newServer).listen();
+            verify(newServer).listen(any(SocketAddress.class));
             verify(oldServer, never()).close();
         } finally {
             dataPlane.shutdown();
@@ -308,7 +320,7 @@ class ElbV2ReservedPortTest {
         when(replacement.close()).thenReturn(Future.succeededFuture());
         for (HttpServer server : List.of(oldServer, replacement)) {
             when(server.requestHandler(any())).thenReturn(server);
-            when(server.listen()).thenReturn(Future.succeededFuture(server));
+            when(server.listen(any(SocketAddress.class))).thenReturn(Future.succeededFuture(server));
         }
         when(dataPlane.vertx.createHttpServer(any(HttpServerOptions.class))).thenReturn(oldServer, replacement);
         Listener first = new Listener();
@@ -326,13 +338,13 @@ class ElbV2ReservedPortTest {
         }
         try {
             publishRuntime(dataPlane, first, "us-west-2", first.getPort(), List.of());
-            verify(oldServer).listen();
+            verify(oldServer).listen(any(SocketAddress.class));
             removeRuntime(dataPlane, first.getListenerArn(), first.getPort());
             verify(oldServer).close();
             publishRuntime(dataPlane, second, "us-west-2", second.getPort(), List.of());
-            verify(replacement, never()).listen();
+            verify(replacement, never()).listen(any(SocketAddress.class));
             close.complete();
-            verify(replacement).listen();
+            verify(replacement).listen(any(SocketAddress.class));
             removeRuntime(dataPlane, second.getListenerArn(), second.getPort());
             verify(replacement).close();
         } finally {
@@ -357,7 +369,7 @@ class ElbV2ReservedPortTest {
         Promise<Void> oldClose = Promise.promise();
         for (HttpServer server : List.of(oldServer, movedServer, reusedServer)) {
             when(server.requestHandler(any())).thenReturn(server);
-            when(server.listen()).thenReturn(Future.succeededFuture(server));
+            when(server.listen(any(SocketAddress.class))).thenReturn(Future.succeededFuture(server));
             when(server.close()).thenReturn(Future.succeededFuture());
         }
         when(oldServer.close()).thenReturn(oldClose.future());
@@ -384,16 +396,16 @@ class ElbV2ReservedPortTest {
             removeRuntime(dataPlane, old.getListenerArn(), old.getPort());
             verify(oldServer).close();
             publishRuntime(dataPlane, moved, "us-west-2", moved.getPort(), List.of(fixedRule("pending")));
-            verify(reusedServer, never()).listen();
+            verify(reusedServer, never()).listen(any(SocketAddress.class));
             moved.setPort(9443);
             publishRuntime(dataPlane, moved, "us-west-2", moved.getPort(), List.of(fixedRule("moved")));
-            verify(movedServer).listen();
+            verify(movedServer).listen(any(SocketAddress.class));
             oldClose.complete();
-            verify(reusedServer, never()).listen();
+            verify(reusedServer, never()).listen(any(SocketAddress.class));
             verify(movedServer, never()).close();
             assertFixedResponse(movedServer, "moved.example.test", "moved");
             publishRuntime(dataPlane, reused, "us-west-2", reused.getPort(), List.of(fixedRule("reused")));
-            verify(reusedServer).listen();
+            verify(reusedServer).listen(any(SocketAddress.class));
             assertFixedResponse(reusedServer, "reused.example.test", "reused");
             removeRuntime(dataPlane, reused.getListenerArn(), reused.getPort());
             verify(reusedServer).close();
@@ -421,7 +433,7 @@ class ElbV2ReservedPortTest {
         HttpServer replacement = mock(HttpServer.class);
         for (HttpServer server : List.of(failed, replacement)) {
             when(server.requestHandler(any())).thenReturn(server);
-            when(server.listen()).thenReturn(Future.succeededFuture(server));
+            when(server.listen(any(SocketAddress.class))).thenReturn(Future.succeededFuture(server));
             when(server.close()).thenReturn(Future.succeededFuture());
         }
         IllegalStateException failure = new IllegalStateException("controlled " + stage + " failure");
@@ -430,8 +442,8 @@ class ElbV2ReservedPortTest {
             case "factory" -> when(dataPlane.vertx.createHttpServer(any(HttpServerOptions.class)))
                     .thenThrow(failure).thenReturn(replacement);
             case "handler" -> when(failed.requestHandler(any())).thenThrow(failure);
-            case "listen" -> when(failed.listen()).thenThrow(failure);
-            case "failed-future" -> when(failed.listen()).thenReturn(Future.failedFuture(failure));
+            case "listen" -> when(failed.listen(any(SocketAddress.class))).thenThrow(failure);
+            case "failed-future" -> when(failed.listen(any(SocketAddress.class))).thenReturn(Future.failedFuture(failure));
             default -> throw new IllegalArgumentException(stage);
         }
         Listener listener = new Listener();
@@ -454,7 +466,7 @@ class ElbV2ReservedPortTest {
                 verify(failed).close();
             }
             publishRuntime(dataPlane, listener, "us-west-2", listener.getPort(), List.of(fixedRule("recovered")));
-            verify(replacement).listen();
+            verify(replacement).listen(any(SocketAddress.class));
             assertFixedResponse(replacement, "retry.example.test", "recovered");
             removeRuntime(dataPlane, listener.getListenerArn(), listener.getPort());
             verify(replacement).close();
@@ -480,10 +492,10 @@ class ElbV2ReservedPortTest {
         Promise<HttpServer> oldListen = Promise.promise();
         Promise<Void> oldClose = Promise.promise();
         when(oldServer.requestHandler(any())).thenReturn(oldServer);
-        when(oldServer.listen()).thenReturn(oldListen.future());
+        when(oldServer.listen(any(SocketAddress.class))).thenReturn(oldListen.future());
         when(oldServer.close()).thenReturn(deferClose ? oldClose.future() : Future.succeededFuture());
         when(replacement.requestHandler(any())).thenReturn(replacement);
-        when(replacement.listen()).thenReturn(Future.succeededFuture(replacement));
+        when(replacement.listen(any(SocketAddress.class))).thenReturn(Future.succeededFuture(replacement));
         when(replacement.close()).thenReturn(Future.succeededFuture());
         when(dataPlane.vertx.createHttpServer(any(HttpServerOptions.class))).thenReturn(oldServer, replacement);
         Listener first = new Listener();
@@ -501,15 +513,15 @@ class ElbV2ReservedPortTest {
         }
         try {
             publishRuntime(dataPlane, first, "us-west-2", first.getPort(), List.of());
-            verify(oldServer).listen();
+            verify(oldServer).listen(any(SocketAddress.class));
             removeRuntime(dataPlane, first.getListenerArn(), first.getPort());
             verify(oldServer).close();
             publishRuntime(dataPlane, second, "us-west-2", second.getPort(), List.of(fixedRule("replacement")));
             if (deferClose) {
-                verify(replacement, never()).listen();
+                verify(replacement, never()).listen(any(SocketAddress.class));
                 oldClose.complete();
             }
-            verify(replacement).listen();
+            verify(replacement).listen(any(SocketAddress.class));
             oldListen.fail(new IllegalStateException("obsolete listen failure"));
             verify(replacement, never()).close();
             assertFixedResponse(replacement, "replacement.example.test", "replacement");

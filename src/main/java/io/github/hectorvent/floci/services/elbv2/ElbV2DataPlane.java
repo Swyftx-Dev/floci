@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.config.TlsProxyServer;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver.CertificateMaterial;
 import io.github.hectorvent.floci.core.common.Pem;
+import io.github.hectorvent.floci.core.common.port.SharedHttpPorts;
 import io.github.hectorvent.floci.core.common.tls.ReloadingKeyManager;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
@@ -36,6 +37,7 @@ import io.vertx.core.net.JdkSSLEngineOptions;
 import io.vertx.core.net.KeyCertOptions;
 import io.vertx.core.net.NetSocket;
 import io.vertx.core.net.PemKeyCertOptions;
+import io.vertx.core.net.SocketAddress;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -116,6 +118,9 @@ public class ElbV2DataPlane {
 
     @Inject
     ObjectMapper objectMapper;
+
+    @Inject
+    SharedHttpPorts sharedHttpPorts;
 
     private final Map<Integer, HttpServer> servers = new ConcurrentHashMap<>();
     private final Map<Integer, PortState> portStates = new ConcurrentHashMap<>();
@@ -219,6 +224,7 @@ public class ElbV2DataPlane {
             synchronized (entry.getValue()) {
                 HttpServer server = servers.remove(entry.getKey());
                 if (server != null) {
+                    sharedHttpPorts.detachBackend(entry.getKey(), server);
                     server.close();
                 }
             }
@@ -489,7 +495,10 @@ public class ElbV2DataPlane {
         servers.put(port, server);
         try {
             server.requestHandler(req -> handleRequest(req, port));
-            server.listen()
+            // The port itself is the shared socket other data planes such as VPC Lattice listen through
+            // too; this server listens on loopback behind it and gets every connection they do not claim.
+            server.listen(SocketAddress.inetSocketAddress(0, "127.0.0.1"))
+                    .compose(listening -> sharedHttpPorts.attachBackend(port, server, listening.actualPort()))
                     .onSuccess(s -> LOG.infov("ELBv2 {0} listener port started on {1}",
                             secure ? "HTTPS" : "HTTP", String.valueOf(port)))
                     .onFailure(err -> onCurrentPort(port, state, () -> {
@@ -685,7 +694,10 @@ public class ElbV2DataPlane {
         state.closing++;
         Future<Void> closed;
         try {
-            closed = server.close();
+            // The shared socket is released too when nothing else listens on the port, so a
+            // restart waits for both before binding again.
+            Future<Void> released = sharedHttpPorts.detachBackend(port, server);
+            closed = Future.join(released, server.close()).mapEmpty();
         } catch (RuntimeException failure) {
             state.closing--;
             throw failure;

@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.config.TlsProxyServer;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver.CertificateMaterial;
 import io.github.hectorvent.floci.core.common.Pem;
+import io.github.hectorvent.floci.core.common.port.SharedHttpPorts;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
@@ -19,6 +20,7 @@ import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
+import io.vertx.core.net.SocketAddress;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
@@ -55,6 +57,7 @@ class ElbV2TlsCohortTest {
         String certificateArn = "arn:aws:acm:us-west-2:000000000000:certificate/shared";
         String alias = "replacement.example.test";
         ElbV2DataPlane dataPlane = new ElbV2DataPlane();
+        dataPlane.sharedHttpPorts = sharedHttpPorts();
         dataPlane.config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.ElbV2ServiceConfig elb = mock(EmulatorConfig.ElbV2ServiceConfig.class);
@@ -70,12 +73,12 @@ class ElbV2TlsCohortTest {
         HttpServer server = mock(HttpServer.class);
         HttpServer otherServer = mock(HttpServer.class);
         when(otherServer.requestHandler(any())).thenReturn(otherServer);
-        when(otherServer.listen()).thenReturn(Future.succeededFuture(otherServer));
+        when(otherServer.listen(any(SocketAddress.class))).thenReturn(Future.succeededFuture(otherServer));
         when(otherServer.close()).thenReturn(Future.succeededFuture());
         when(dataPlane.vertx.createHttpServer(any(HttpServerOptions.class))).thenAnswer(call ->
                 ((HttpServerOptions) call.getArgument(0)).getPort() == 9443 ? otherServer : server);
         when(server.requestHandler(any())).thenReturn(server);
-        when(server.listen()).thenReturn(Future.succeededFuture(server));
+        when(server.listen(any(SocketAddress.class))).thenReturn(Future.succeededFuture(server));
         when(server.close()).thenReturn(Future.succeededFuture());
         CertificateGenerator generator = new CertificateGenerator();
         CertificateMaterial seed = material(generator, certificateArn, "seed.example.test");
@@ -151,7 +154,7 @@ class ElbV2TlsCohortTest {
             assertTrue(secondResolved.await(5, TimeUnit.SECONDS), "second publisher did not resolve its material");
             workers.submit(() -> publishRuntime(dataPlane, unrelated, region, unrelated.getPort(), List.of(fixedRule("unrelated"))))
                     .get(1, TimeUnit.SECONDS);
-            verify(otherServer).listen();
+            verify(otherServer).listen(any(SocketAddress.class));
             try {
                 secondPublication.get(3, TimeUnit.SECONDS);
             } catch (TimeoutException expected) {
@@ -216,5 +219,13 @@ class ElbV2TlsCohortTest {
         rule.setDefault(true);
         rule.setActions(List.of(action));
         return rule;
+    }
+
+    /** A shared socket that binds at once and frees the port at once. */
+    private static SharedHttpPorts sharedHttpPorts() {
+        SharedHttpPorts ports = mock(SharedHttpPorts.class);
+        when(ports.attachBackend(anyInt(), any(), anyInt())).thenReturn(Future.succeededFuture());
+        when(ports.detachBackend(anyInt(), any())).thenReturn(Future.succeededFuture());
+        return ports;
     }
 }

@@ -39,8 +39,10 @@ import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -1214,12 +1216,37 @@ public class ContainerLifecycleManager {
         }
     }
 
+    private static List<Capability> capabilities(List<String> names) {
+        List<Capability> capabilities = new ArrayList<>();
+        if (names == null) {
+            return capabilities;
+        }
+        for (String name : names) {
+            String normalized = name.trim().toUpperCase(Locale.ROOT);
+            normalized = normalized.startsWith("CAP_") ? normalized.substring(4) : normalized;
+            try {
+                capabilities.add(Capability.valueOf(normalized));
+            } catch (IllegalArgumentException e) {
+                LOG.warnv("Ignoring unknown Linux capability {0}", name);
+            }
+        }
+        return capabilities;
+    }
+
     private HostConfig buildHostConfig(ContainerSpec spec) {
         HostConfig hostConfig = HostConfig.newHostConfig();
 
         // Privileged mode (required for e.g. k3s containers)
         if (spec.privileged()) {
             hostConfig.withPrivileged(true);
+        }
+        List<Capability> capAdd = capabilities(spec.capAdd());
+        List<Capability> capDrop = capabilities(spec.capDrop());
+        if (!capAdd.isEmpty()) {
+            hostConfig.withCapAdd(capAdd.toArray(Capability[]::new));
+        }
+        if (!capDrop.isEmpty()) {
+            hostConfig.withCapDrop(capDrop.toArray(Capability[]::new));
         }
         if ("true".equals(ContainerStorageHelper.labelValue(
                 spec.labels(), ContainerStorageHelper.SECURITY_GROUP_WORKLOAD_LABEL))) {

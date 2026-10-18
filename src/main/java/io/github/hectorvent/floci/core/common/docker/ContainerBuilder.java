@@ -169,6 +169,8 @@ public class ContainerBuilder {
         private final List<String> groupAdd = new ArrayList<>();
         private final List<String> dnsServers = new ArrayList<>();
         private final List<String> linkLocalIps = new ArrayList<>();
+        private final List<String> capAdd = new ArrayList<>();
+        private final List<String> capDrop = new ArrayList<>();
         private final List<DeviceRequest> deviceRequests = new ArrayList<>();
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
@@ -268,6 +270,17 @@ public class ContainerBuilder {
          */
         public Builder withCpuShares(int cpuShares) {
             this.cpuShares = cpuShares;
+            return this;
+        }
+
+        /** Linux capabilities to add and drop, by name with or without the {@code CAP_} prefix. */
+        public Builder withCapabilities(List<String> add, List<String> drop) {
+            if (add != null) {
+                capAdd.addAll(add);
+            }
+            if (drop != null) {
+                capDrop.addAll(drop);
+            }
             return this;
         }
 
@@ -707,7 +720,9 @@ public class ContainerBuilder {
                     readonlyRootfs,
                     List.copyOf(linkLocalIps),
                     Map.copyOf(portBindingHostIps),
-                    init
+                    init,
+                    List.copyOf(capAdd),
+                    List.copyOf(capDrop)
             );
         }
     }

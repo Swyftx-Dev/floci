@@ -47,6 +47,8 @@ import java.util.regex.Pattern;
  *        A port with no entry here, and not in {@code loopbackPortBindings}, binds every interface
  * @param init Whether Docker runs its init process as PID 1, forwarding signals to the command, for
  *        images whose command does not handle SIGTERM itself
+ * @param capAdd Linux capabilities added to the container's default set, by name without {@code CAP_}
+ * @param capDrop Linux capabilities dropped from the container's default set, by name without {@code CAP_}
  */
 public record ContainerSpec(
         String image,
@@ -77,7 +79,9 @@ public record ContainerSpec(
         boolean readonlyRootfs,
         List<String> linkLocalIps,
         Map<Integer, String> portBindingHostIps,
-        boolean init
+        boolean init,
+        List<String> capAdd,
+        List<String> capDrop
 ) {
     private static final Pattern LINK_LOCAL_IPV4 = Pattern.compile("^169\\.254\\.(\\d{1,3})\\.(\\d{1,3})$");
     private static final Set<String> NETWORKS_WITHOUT_ENDPOINT_IPAM = Set.of("bridge", "default", "host", "none");
@@ -97,7 +101,7 @@ public record ContainerSpec(
     public ContainerSpec(String image) {
         this(image, null, List.of(), null, null, null, Map.of(), List.of(), List.of(), null,
                 List.of(), List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(),
-                null, null, List.of(), List.of(), null, null, false, List.of(), Map.of(), false);
+                null, null, List.of(), List.of(), null, null, false, List.of(), Map.of(), false, List.of(), List.of());
     }
 
     /**
@@ -129,7 +133,7 @@ public record ContainerSpec(
         this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, List.of(), exposedPorts,
                 networkMode, mounts, binds, List.of(), extraHosts, labels, logConfig, privileged,
                 cgroupnsMode, dnsServers, workingDir, user, groupAdd, List.of(), null, null, false,
-                List.of(), Map.of(), false);
+                List.of(), Map.of(), false, List.of(), List.of());
     }
 
     /**
@@ -163,7 +167,7 @@ public record ContainerSpec(
         this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, loopbackPortBindings,
                 exposedPorts, networkMode, mounts, binds, List.of(), extraHosts, labels, logConfig,
                 privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, List.of(),
-                null, null, false, List.of(), Map.of(), false);
+                null, null, false, List.of(), Map.of(), false, List.of(), List.of());
     }
 
     /**
@@ -197,7 +201,7 @@ public record ContainerSpec(
         this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, loopbackPortBindings,
                 exposedPorts, networkMode, mounts, binds, List.of(), extraHosts, labels, logConfig,
                 privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, deviceRequests,
-                null, null, false, List.of(), Map.of(), false);
+                null, null, false, List.of(), Map.of(), false, List.of(), List.of());
     }
 
     /**

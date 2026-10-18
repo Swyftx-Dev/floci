@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsProxyServer;
+import io.github.hectorvent.floci.core.common.port.SharedHttpPorts;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
@@ -21,8 +22,6 @@ import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.HttpMethod;
-import io.vertx.core.http.HttpServer;
-import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
 import io.vertx.core.http.HttpVersion;
@@ -88,7 +87,10 @@ public class ElbV2DataPlane {
     @Inject
     ObjectMapper objectMapper;
 
-    private final Map<Integer, HttpServer> servers = new ConcurrentHashMap<>();
+    @Inject
+    SharedHttpPorts sharedHttpPorts;
+
+    private final Map<Integer, SharedHttpPorts.Tenant> servers = new ConcurrentHashMap<>();
     private final java.util.concurrent.atomic.AtomicBoolean releaseHandlerRegistered =
             new java.util.concurrent.atomic.AtomicBoolean();
     private final Map<Integer, Map<String, String>> listenersByHostAndPort = new ConcurrentHashMap<>();
@@ -111,8 +113,8 @@ public class ElbV2DataPlane {
 
     @PreDestroy
     void shutdown() {
-        for (Map.Entry<Integer, HttpServer> e : servers.entrySet()) {
-            e.getValue().close();
+        for (Map.Entry<Integer, SharedHttpPorts.Tenant> e : servers.entrySet()) {
+            sharedHttpPorts.detach(e.getKey(), e.getValue());
         }
         servers.clear();
         listenersByHostAndPort.clear();
@@ -240,7 +242,7 @@ public class ElbV2DataPlane {
         }
     }
 
-    private HttpServer startPortServer(int port) {
+    private SharedHttpPorts.Tenant startPortServer(int port) {
         if (isReservedByFloci(port)) {
             // Returning null leaves `servers` untouched: computeIfAbsent skips a null mapping.
             // The emulator's own port cannot be handed over, so the two cases need different
@@ -252,19 +254,26 @@ public class ElbV2DataPlane {
                     + "registered but serves no traffic. {1}", String.valueOf(port), remedy);
             return null;
         }
-        HttpServer server = vertx.createHttpServer(new HttpServerOptions()
-                .setHost("0.0.0.0")
-                .setPort(port));
-        server.requestHandler(req -> handleRequest(req, port));
-        server.listen()
+        SharedHttpPorts.Tenant tenant = new SharedHttpPorts.Tenant() {
+            @Override
+            public boolean servesHost(String host) {
+                return ownedListenerArn(port, host) != null;
+            }
+
+            @Override
+            public void handle(HttpServerRequest request) {
+                handleRequest(request, port);
+            }
+        };
+        // ELBv2 is the fallback tenant: a lone listener on a port answers any Host header.
+        sharedHttpPorts.attach(port, tenant, true)
                 .onSuccess(s -> LOG.infov("ELBv2 listener port started on {0}", String.valueOf(port)))
                 .onFailure(err -> {
-                    servers.remove(port);
+                    servers.remove(port, tenant);
                     clearPortBindings(port);
-                    server.close();
                     LOG.warnv("ELBv2 listener port failed to start on {0}: {1}", String.valueOf(port), err.getMessage());
                 });
-        return server;
+        return tenant;
     }
 
     private void closePortServerIfUnused(int port, Map<String, String> listenersByHost) {
@@ -272,9 +281,9 @@ public class ElbV2DataPlane {
             return;
         }
         listenersByHostAndPort.remove(port, listenersByHost);
-        HttpServer server = servers.remove(port);
-        if (server != null) {
-            server.close();
+        SharedHttpPorts.Tenant tenant = servers.remove(port);
+        if (tenant != null) {
+            sharedHttpPorts.detach(port, tenant);
         }
     }
 
@@ -360,6 +369,19 @@ public class ElbV2DataPlane {
      * single load balancer needs no hostname at all.
      */
     private String resolveListenerArn(int port, String hostHeader) {
+        String listenerArn = ownedListenerArn(port, hostHeader);
+        if (listenerArn != null) {
+            return listenerArn;
+        }
+        Map<String, String> listenersByHost = listenersByHostAndPort.get(port);
+        if (listenersByHost != null && listenersByHost.size() == 1) {
+            return listenersByHost.values().iterator().next();
+        }
+        return null;
+    }
+
+    /** The listener a Host header names outright: its load balancer's DNS name, or a host-header rule. */
+    private String ownedListenerArn(int port, String hostHeader) {
         Map<String, String> listenersByHost = listenersByHostAndPort.get(port);
         if (listenersByHost == null || listenersByHost.isEmpty()) {
             return null;
@@ -377,10 +399,6 @@ public class ElbV2DataPlane {
             LOG.debugv("ELBv2 port {0}: {1} listeners declare Host {2} in a host-header condition, "
                     + "so none of them can claim it", String.valueOf(port),
                     String.valueOf(declaring.size()), host);
-            return null;
-        }
-        if (listenersByHost.size() == 1) {
-            return listenersByHost.values().iterator().next();
         }
         return null;
     }

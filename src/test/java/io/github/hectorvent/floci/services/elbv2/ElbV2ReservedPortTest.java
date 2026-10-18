@@ -2,11 +2,9 @@ package io.github.hectorvent.floci.services.elbv2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsProxyServer;
+import io.github.hectorvent.floci.core.common.port.SharedHttpPorts;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
 import io.vertx.core.Promise;
-import io.vertx.core.Vertx;
-import io.vertx.core.http.HttpServer;
-import io.vertx.core.http.HttpServerOptions;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -16,7 +14,9 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -106,17 +106,14 @@ class ElbV2ReservedPortTest {
             return null;
         }).when(proxy).onPortReleased(any());
 
-        HttpServer server = mock(HttpServer.class);
-        when(server.requestHandler(any())).thenReturn(server);
+        SharedHttpPorts sharedHttpPorts = mock(SharedHttpPorts.class);
         // Left uncompleted: the listen outcome is not what this test is about.
-        when(server.listen()).thenReturn(Promise.<HttpServer>promise().future());
-        Vertx vertx = mock(Vertx.class);
-        when(vertx.createHttpServer(any(HttpServerOptions.class))).thenReturn(server);
+        when(sharedHttpPorts.attach(anyInt(), any(), anyBoolean())).thenReturn(Promise.<Void>promise().future());
 
         ElbV2DataPlane dataPlane = new ElbV2DataPlane();
         dataPlane.config = config;
         dataPlane.tlsProxyServer = proxy;
-        dataPlane.vertx = vertx;
+        dataPlane.sharedHttpPorts = sharedHttpPorts;
         dataPlane.elbV2Service = mock(ElbV2Service.class);
 
         Listener listener = new Listener();
@@ -126,7 +123,7 @@ class ElbV2ReservedPortTest {
 
         assertDoesNotThrow(() -> dataPlane.startListener(listener, "us-west-2", List.of()),
                 "the released-port replay re-entered the server map for the key it was computing");
-        verify(vertx, times(1)).createHttpServer(any(HttpServerOptions.class));
+        verify(sharedHttpPorts, times(1)).attach(eq(443), any(), eq(true));
     }
 
     @Test

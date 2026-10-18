@@ -93,6 +93,7 @@ public class MskService implements ResourceProvider {
     private final MskBrokerFrontEnd frontEnd;
     // Operations complete as they are requested, so they are kept only for DescribeClusterOperation.
     private final Map<String, Map<String, Object>> operations = new ConcurrentHashMap<>();
+    private final Set<String> pendingTopicRestore = ConcurrentHashMap.newKeySet();
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
     private final Object configurationUpdateLock = new Object();
 
@@ -120,6 +121,50 @@ public class MskService implements ResourceProvider {
     @PostConstruct
     public void init() {
         startReadinessPoller();
+    }
+
+    /**
+     * Brings each persisted cluster's broker back after a restart: its container was removed at
+     * shutdown, but its volume kept the data. The cluster is ACTIVE again once the broker answers,
+     * and its API-managed topics are created on it if the volume lost them.
+     */
+    public void restorePersistedRuntime() {
+        if (config.services().msk().mock()) {
+            return;
+        }
+        for (MskCluster cluster : allClusters()) {
+            if (cluster.getState() == ClusterState.DELETING || cluster.getBootstrapBrokers() == null) {
+                continue;
+            }
+            try {
+                if (redpandaManager.tryStartContainer(cluster)) {
+                    cluster.setState(ClusterState.CREATING);
+                    pendingTopicRestore.add(cluster.getClusterArn());
+                }
+                putCluster(cluster);
+                LOG.infov("Restored the broker of MSK cluster {0}", cluster.getClusterName());
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not restore the broker of MSK cluster {0}: {1}", cluster.getClusterName(),
+                        e.getMessage());
+            }
+        }
+    }
+
+    private void restoreTopics(MskCluster cluster) {
+        for (MskTopic topic : allTopics()) {
+            if (!cluster.getClusterArn().equals(topic.getClusterArn())) {
+                continue;
+            }
+            redpandaManager.rpkQuietly(cluster,
+                    topicCreateArgs(topic.getTopicName(), topic.getPartitionCount(), topic.getConfigs()));
+        }
+    }
+
+    private List<MskTopic> allTopics() {
+        if (topicStorage instanceof AccountAwareStorageBackend<MskTopic> aware) {
+            return aware.scanAllAccounts();
+        }
+        return topicStorage.scan(k -> true);
     }
 
     @PreDestroy
@@ -626,10 +671,7 @@ public class MskService implements ResourceProvider {
         topic.setReplicationFactor(replicationFactor);
         topic.setConfigs(configs);
         if (!config.services().msk().mock()) {
-            List<String> args = new ArrayList<>(List.of("topic", "create", topicName,
-                    "-p", String.valueOf(partitionCount), "-r", "1"));
-            topicConfigs(configs).forEach((k, v) -> args.addAll(List.of("-c", k + "=" + v)));
-            redpandaManager.rpk(cluster, args);
+            redpandaManager.rpk(cluster, topicCreateArgs(topicName, partitionCount, configs));
         }
         topicStorage.put(key, topic);
         return topic;
@@ -682,6 +724,14 @@ public class MskService implements ResourceProvider {
         }
         topicStorage.delete(topicKey(clusterArn, topicName));
         return topic;
+    }
+
+    /** One replica whatever factor was asked for: the broker is a single node. */
+    private static List<String> topicCreateArgs(String topicName, int partitionCount, String configs) {
+        List<String> args = new ArrayList<>(List.of("topic", "create", topicName,
+                "-p", String.valueOf(partitionCount), "-r", "1"));
+        topicConfigs(configs).forEach((k, v) -> args.addAll(List.of("-c", k + "=" + v)));
+        return args;
     }
 
     private static String topicKey(String clusterArn, String topicName) {
@@ -930,6 +980,9 @@ public class MskService implements ResourceProvider {
                     if (cluster.getState() == ClusterState.CREATING && !config.services().msk().mock()) {
                         if (redpandaManager.isReady(cluster)) {
                             LOG.infov("MSK Cluster {0} is now ACTIVE", cluster.getClusterName());
+                            if (pendingTopicRestore.remove(cluster.getClusterArn())) {
+                                restoreTopics(cluster);
+                            }
                             cluster.setState(ClusterState.ACTIVE);
                             putCluster(cluster);
                         }

@@ -32,6 +32,7 @@ import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.durable.DurableExecutionService;
 import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager;
 import io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager;
+import io.github.hectorvent.floci.services.msk.MskService;
 import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerManager;
 import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import io.github.hectorvent.floci.services.pipes.PipesService;
@@ -117,6 +118,8 @@ class EmulatorLifecycleTest {
     @Mock private ElbV2Service elbV2Service;
     @Mock private ElbClassicService elbClassicService;
     @Mock private VpcLatticeService vpcLatticeService;
+    @Mock private MskService mskService;
+    @Mock private EmulatorConfig.MskServiceConfig mskServiceConfig;
     @Mock private EcsService ecsService;
     @Mock private EksService eksService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
@@ -158,6 +161,8 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(elbServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.vpclattice()).thenReturn(vpcLatticeServiceConfig);
         Mockito.lenient().when(vpcLatticeServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.msk()).thenReturn(mskServiceConfig);
+        Mockito.lenient().when(mskServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.lambda()).thenReturn(lambdaServiceConfig);
         Mockito.lenient().when(lambdaServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.eks()).thenReturn(eksServiceConfig);
@@ -178,7 +183,7 @@ class EmulatorLifecycleTest {
                 memoryDbContainerManager, memoryDbProxyManager,
                 docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
                 rabbitMqManager, flinkContainerManager, rdsService, timestreamInfluxDbService,
-                elbV2Service, elbClassicService, vpcLatticeService, ecsService,
+                elbV2Service, elbClassicService, vpcLatticeService, mskService, ecsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecsTaskRoleCredentialsServer, ecrRegistryManager, flociUiManager, initLifecycleState,
                 schemaCreationWorker, stepFunctionsService, durableExecutionService, containerTeardowns,

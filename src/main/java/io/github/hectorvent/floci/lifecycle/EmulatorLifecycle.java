@@ -33,6 +33,7 @@ import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.durable.DurableExecutionService;
 import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager;
 import io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager;
+import io.github.hectorvent.floci.services.msk.MskService;
 import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerManager;
 import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import io.github.hectorvent.floci.services.pipes.PipesService;
@@ -104,6 +105,7 @@ public class EmulatorLifecycle {
     private final EcsService ecsService;
     private final ElbClassicService elbClassicService;
     private final VpcLatticeService vpcLatticeService;
+    private final MskService mskService;
     private final InitializationHooksRunner initializationHooksRunner;
     private final SqsEventSourcePoller sqsPoller;
     private final KinesisEventSourcePoller kinesisPoller;
@@ -148,6 +150,7 @@ public class EmulatorLifecycle {
                              ElbV2Service elbV2Service,
                              ElbClassicService elbClassicService,
                              VpcLatticeService vpcLatticeService,
+                             MskService mskService,
                              EcsService ecsService,
                              InitializationHooksRunner initializationHooksRunner,
                              SqsEventSourcePoller sqsPoller,
@@ -190,6 +193,7 @@ public class EmulatorLifecycle {
         this.elbV2Service = elbV2Service;
         this.elbClassicService = elbClassicService;
         this.vpcLatticeService = vpcLatticeService;
+        this.mskService = mskService;
         this.ecsService = ecsService;
         this.initializationHooksRunner = initializationHooksRunner;
         this.sqsPoller = sqsPoller;
@@ -286,6 +290,9 @@ public class EmulatorLifecycle {
         }
         if (config.services().vpclattice().enabled()) {
             vpcLatticeService.restorePersistedRuntime();
+        }
+        if (config.services().msk().enabled()) {
+            mskService.restorePersistedRuntime();
         }
         // After the load balancers: the reconciler registers the tasks it starts as their targets.
         if (config.services().ecs().enabled()) {

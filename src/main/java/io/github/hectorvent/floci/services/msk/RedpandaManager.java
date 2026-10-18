@@ -294,6 +294,16 @@ public class RedpandaManager {
         }
     }
 
+    /** As {@link #rpk}, for a restore that expects most of what it asks for to exist already. */
+    public void rpkQuietly(MskCluster cluster, List<String> args) {
+        if (cluster.getContainerId() == null) {
+            return;
+        }
+        ContainerExec.Result result = exec(cluster, args);
+        LOG.debugv("rpk {0} on MSK cluster {1}: {2}", String.join(" ", args), cluster.getClusterName(),
+                result.stdout());
+    }
+
     private ContainerExec.Result exec(MskCluster cluster, List<String> args) {
         List<String> cmd = new ArrayList<>();
         cmd.add("rpk");

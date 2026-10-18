@@ -56,6 +56,7 @@ import io.github.hectorvent.floci.services.ecs.model.ManagedAgent;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
+import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.ProtectedTask;
 import io.github.hectorvent.floci.services.ecs.model.RegisterContainerInstanceRequest;
 import io.github.hectorvent.floci.services.ecs.model.RegisterTaskDefinitionRequest;
@@ -2246,10 +2247,56 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     /** Registers a freshly-started task's containers as ELBv2 targets if its service is load-balanced. */
     private void registerTaskWithLoadBalancers(EcsTask task, EcsCluster cluster, String region) {
-        EcsServiceModel svc = owningService(task, cluster);
-        if (svc != null && !svc.getLoadBalancers().isEmpty()) {
-            lbRegistrar.registerTask(task, svc, region);
+        List<EcsLoadBalancer> bindings = targetBindings(task, owningService(task, cluster));
+        if (!bindings.isEmpty()) {
+            lbRegistrar.registerTask(task, bindings, region);
         }
+    }
+
+    /**
+     * The target groups a task of the service joins: its {@code loadBalancers}, and each
+     * {@code vpcLatticeConfigurations} entry resolved through the task definition's named port mapping.
+     */
+    private List<EcsLoadBalancer> targetBindings(EcsTask task, EcsServiceModel svc) {
+        if (svc == null) {
+            return List.of();
+        }
+        List<EcsLoadBalancer> bindings = new ArrayList<>(svc.getLoadBalancers());
+        List<Map<String, Object>> latticeConfigurations = vpcLatticeConfigurations(svc);
+        TaskDefinition taskDef = latticeConfigurations.isEmpty() ? null : taskDefinitionOf(task);
+        if (taskDef == null || taskDef.getContainerDefinitions() == null) {
+            return bindings;
+        }
+        for (Map<String, Object> configuration : latticeConfigurations) {
+            if (!(configuration.get("targetGroupArn") instanceof String targetGroupArn)
+                    || !(configuration.get("portName") instanceof String portName)) {
+                continue;
+            }
+            for (ContainerDefinition containerDef : taskDef.getContainerDefinitions()) {
+                if (containerDef.getPortMappings() == null) {
+                    continue;
+                }
+                for (PortMapping mapping : containerDef.getPortMappings()) {
+                    if (portName.equals(mapping.name())) {
+                        EcsLoadBalancer binding = new EcsLoadBalancer();
+                        binding.setTargetGroupArn(targetGroupArn);
+                        binding.setContainerName(containerDef.getName());
+                        binding.setContainerPort(mapping.containerPort());
+                        bindings.add(binding);
+                    }
+                }
+            }
+        }
+        return bindings;
+    }
+
+    @SuppressWarnings("unchecked")
+    static List<Map<String, Object>> vpcLatticeConfigurations(EcsServiceModel svc) {
+        Object configurations = svc.getUnparsed() == null ? null : svc.getUnparsed().get("vpcLatticeConfigurations");
+        if (!(configurations instanceof List<?> list)) {
+            return List.of();
+        }
+        return list.stream().filter(Map.class::isInstance).map(entry -> (Map<String, Object>) entry).toList();
     }
 
     /** Registers a freshly-started task in Cloud Map if its service declared service registries. */
@@ -2282,6 +2329,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             for (EcsLoadBalancer lb : svc.getLoadBalancers()) {
                 if (lb.getTargetGroupArn() != null && !lb.getTargetGroupArn().isBlank()) {
                     targetGroupArns.add(lb.getTargetGroupArn());
+                }
+            }
+            for (Map<String, Object> configuration : vpcLatticeConfigurations(svc)) {
+                if (configuration.get("targetGroupArn") instanceof String targetGroupArn && !targetGroupArn.isBlank()) {
+                    targetGroupArns.add(targetGroupArn);
                 }
             }
             if (discoveryRegistrar != null) {
@@ -2389,9 +2441,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (cluster == null) {
             return;
         }
-        EcsServiceModel svc = owningService(task, cluster);
-        if (svc != null && !svc.getLoadBalancers().isEmpty()) {
-            lbRegistrar.deregisterTask(task, svc, region);
+        List<EcsLoadBalancer> bindings = targetBindings(task, owningService(task, cluster));
+        if (!bindings.isEmpty()) {
+            lbRegistrar.deregisterTask(task, bindings, region);
         }
     }
 
@@ -3002,7 +3054,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     }
                 }
                 if (request.getUnparsed() != null) {
+                    List<Map<String, Object>> latticeBefore = vpcLatticeConfigurations(svc);
                     svc.setUnparsed(mergedUnparsed(svc.getUnparsed(), request.getUnparsed()));
+                    if (!latticeBefore.equals(vpcLatticeConfigurations(svc))) {
+                        reconcileTargetRegistrations(svc, cluster, region);
+                    }
                 }
                 // UpdateServiceRequest.serviceConnectConfiguration is documented as "This parameter
                 // triggers a new service deployment", so a real change rolls the deployment the way a
@@ -3040,6 +3096,28 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 }
                 services.put(key, svc);
                 return svc;
+            }
+        }
+    }
+
+    /** Moves the running tasks' targets onto the service's current target groups. */
+    private void reconcileTargetRegistrations(EcsServiceModel svc, EcsCluster cluster, String region) {
+        if (!dockerMode || lbRegistrar == null) {
+            return;
+        }
+        for (EcsTask task : tasks.values()) {
+            if (!ownedBy(task, svc, cluster)) {
+                continue;
+            }
+            synchronized (task) {
+                if (!TaskStatus.RUNNING.name().equals(task.getLastStatus())) {
+                    continue;
+                }
+                List<EcsLoadBalancer> bindings = targetBindings(task, svc);
+                lbRegistrar.deregisterTask(task, bindings, region);
+                if (!bindings.isEmpty()) {
+                    lbRegistrar.registerTask(task, bindings, region);
+                }
             }
         }
     }

@@ -695,7 +695,15 @@ public class EcsResponseWriter {
                     networkConfigurationNode(s.getNetworkConfiguration().getAwsvpcConfiguration()));
         }
         ArrayNode deployments = objectMapper.createArrayNode();
-        service.deploymentsFor(s).forEach(d -> deployments.add(deploymentNode(d)));
+        Object latticeConfigurations = s.getUnparsed() == null ? null : s.getUnparsed().get("vpcLatticeConfigurations");
+        service.deploymentsFor(s).forEach(d -> {
+            ObjectNode deployment = deploymentNode(d);
+            // AWS reports the service's Lattice configurations on its deployments, not on the service.
+            if (latticeConfigurations != null && "PRIMARY".equals(d.getStatus())) {
+                deployment.set("vpcLatticeConfigurations", objectMapper.valueToTree(latticeConfigurations));
+            }
+            deployments.add(deployment);
+        });
         n.set("deployments", deployments);
         // Both are always reported, empty and all: a service under the ECS controller has no task
         // sets, and one that has not converged yet has no events, and a client has to be able to
@@ -721,6 +729,7 @@ public class EcsResponseWriter {
             }
         }
         EcsJsonPassthrough.write(n, s.getUnparsed(), objectMapper);
+        n.remove("vpcLatticeConfigurations");
         return n;
     }
 

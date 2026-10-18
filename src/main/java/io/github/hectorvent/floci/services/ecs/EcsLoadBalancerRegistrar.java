@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ecs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -8,13 +9,14 @@ import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsRegisteredTargets;
-import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.EcsTaskAddress;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetHealth;
+import io.github.hectorvent.floci.services.vpclattice.VpcLatticeService;
+import io.github.hectorvent.floci.services.vpclattice.model.Target;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -29,12 +31,12 @@ import java.util.Set;
 import java.util.function.BiConsumer;
 
 /**
- * Bridges ECS services to ELBv2: when an ECS service declares a {@code loadBalancers}
- * block, this registrar registers each running task container as a target in the named
- * ELBv2 target group (and deregisters it when the task stops).
+ * Bridges ECS services to target groups: each running task container named by a service's
+ * {@code loadBalancers} or {@code vpcLatticeConfigurations} is registered as a target in the
+ * ELBv2 or VPC Lattice target group, picked by the group's ARN, and deregistered when the task stops.
  * <p>
- * One-way dependency ECS → ELBv2; the ELBv2 data plane reaches the container over plain
- * TCP and never calls back into ECS, so there is no cycle.
+ * One-way dependency ECS → ELBv2 and VPC Lattice; their data planes reach the container over plain
+ * TCP and never call back into ECS, so there is no cycle.
  */
 @ApplicationScoped
 public class EcsLoadBalancerRegistrar {
@@ -42,14 +44,16 @@ public class EcsLoadBalancerRegistrar {
     private static final Logger LOG = Logger.getLogger(EcsLoadBalancerRegistrar.class);
 
     private final ElbV2Service elbV2Service;
+    private final VpcLatticeService vpcLatticeService;
     private final EcsContainerManager containerManager;
     // taskArn → the targets registered for it, persisted so they can be released after a restart
     private final AccountAwareStorageBackend<EcsRegisteredTargets> ledger;
 
     @Inject
-    public EcsLoadBalancerRegistrar(ElbV2Service elbV2Service, EcsContainerManager containerManager,
-                                    StorageFactory storageFactory) {
+    public EcsLoadBalancerRegistrar(ElbV2Service elbV2Service, VpcLatticeService vpcLatticeService,
+                                    EcsContainerManager containerManager, StorageFactory storageFactory) {
         this.elbV2Service = elbV2Service;
+        this.vpcLatticeService = vpcLatticeService;
         this.containerManager = containerManager;
         this.ledger = storageFactory.create("ecs", "ecs-registered-targets.json",
                 new TypeReference<Map<String, EcsRegisteredTargets>>() {});
@@ -63,9 +67,9 @@ public class EcsLoadBalancerRegistrar {
      * reach nothing or whichever container Docker hands the address to next. ECS on AWS likewise
      * deregisters a stopping task's target whoever registered it.
      */
-    public void registerTask(EcsTask task, EcsServiceModel svc, String region) {
+    public void registerTask(EcsTask task, List<EcsLoadBalancer> bindings, String region) {
         List<EcsRegisteredTargets.Target> planned = new ArrayList<>();
-        forEachTarget(task, svc, (tgArn, td) ->
+        forEachTarget(task, bindings, (tgArn, td) ->
                 planned.add(new EcsRegisteredTargets.Target(tgArn, td.getId(), td.getPort())));
         if (planned.isEmpty()) {
             return;
@@ -77,7 +81,11 @@ public class EcsLoadBalancerRegistrar {
         List<EcsRegisteredTargets.Target> registered = new ArrayList<>();
         for (EcsRegisteredTargets.Target target : planned) {
             try {
-                elbV2Service.registerTargets(region, target.targetGroupArn(), List.of(target.toDescription()));
+                if (isLattice(target.targetGroupArn())) {
+                    vpcLatticeService.registerTargets(target.targetGroupArn(), List.of(latticeTarget(target)), region);
+                } else {
+                    elbV2Service.registerTargets(region, target.targetGroupArn(), List.of(target.toDescription()));
+                }
                 registered.add(target);
                 LOG.infov("Registered ECS task target {0}:{1} into target group {2}",
                         target.id(), target.port(), target.targetGroupArn());
@@ -101,9 +109,9 @@ public class EcsLoadBalancerRegistrar {
      * Only a task without an ARN, which {@link #registerTask} cannot record, falls back to the
      * targets its containers resolve to now.
      */
-    public void deregisterTask(EcsTask task, EcsServiceModel svc, String region) {
+    public void deregisterTask(EcsTask task, List<EcsLoadBalancer> bindings, String region) {
         if (task.getTaskArn() == null) {
-            forEachTarget(task, svc, (tgArn, td) -> deregister(region, tgArn, td));
+            forEachTarget(task, bindings, (tgArn, td) -> deregister(region, tgArn, td));
             return;
         }
         Optional<EcsRegisteredTargets> recorded = ledger.get(task.getTaskArn());
@@ -147,23 +155,22 @@ public class EcsLoadBalancerRegistrar {
             }
         }
         for (String tgArn : targetGroupArns) {
-            List<TargetHealth> health;
+            List<TargetDescription> registeredTargets;
             try {
-                health = elbV2Service.describeTargetHealth(region, tgArn, null);
+                registeredTargets = registeredTargets(region, tgArn);
             } catch (Exception e) {
                 // A target group deleted while a service still names it: nothing in it to evict.
                 LOG.debugv("Could not list the targets of {0}: {1}", tgArn, e.getMessage());
                 continue;
             }
-            for (TargetHealth th : health) {
-                TargetDescription td = th.getTarget();
+            for (TargetDescription td : registeredTargets) {
                 boolean atTaskAddress = addresses.stream().anyMatch(a -> a.matches(td.getId(), td.getPort()));
                 if (!atTaskAddress
                         || recorded.contains(new EcsRegisteredTargets.Target(tgArn, td.getId(), td.getPort()))) {
                     continue;
                 }
                 try {
-                    elbV2Service.deregisterTargets(region, tgArn, List.of(td));
+                    deregisterTargets(region, tgArn, td);
                     LOG.warnv("Deregistered stale target {0}:{1} from target group {2}: no ECS task registered it,"
                             + " and its address now belongs to ECS task {3}", td.getId(), td.getPort(), tgArn,
                             task.getTaskArn());
@@ -186,7 +193,7 @@ public class EcsLoadBalancerRegistrar {
 
     private void deregister(String region, String tgArn, TargetDescription td) {
         try {
-            elbV2Service.deregisterTargets(region, tgArn, List.of(td));
+            deregisterTargets(region, tgArn, td);
             LOG.infov("Deregistered ECS task target {0}:{1} from target group {2}",
                     td.getId(), td.getPort(), tgArn);
         } catch (Exception e) {
@@ -194,15 +201,44 @@ public class EcsLoadBalancerRegistrar {
         }
     }
 
-    private void forEachTarget(EcsTask task, EcsServiceModel svc,
+    private List<TargetDescription> registeredTargets(String region, String tgArn) {
+        if (isLattice(tgArn)) {
+            return vpcLatticeService.listTargets(tgArn, null, region).stream()
+                    .map(t -> new EcsRegisteredTargets.Target(tgArn, t.id(), t.port()).toDescription())
+                    .toList();
+        }
+        return elbV2Service.describeTargetHealth(region, tgArn, null).stream().map(TargetHealth::getTarget).toList();
+    }
+
+    private void deregisterTargets(String region, String tgArn, TargetDescription td) {
+        if (isLattice(tgArn)) {
+            vpcLatticeService.deregisterTargets(tgArn,
+                    List.of(latticeTarget(new EcsRegisteredTargets.Target(tgArn, td.getId(), td.getPort()))), region);
+        } else {
+            elbV2Service.deregisterTargets(region, tgArn, List.of(td));
+        }
+    }
+
+    private static boolean isLattice(String targetGroupArn) {
+        return AwsArnUtils.isArnFor(targetGroupArn, "vpc-lattice");
+    }
+
+    private static Target latticeTarget(EcsRegisteredTargets.Target registered) {
+        Target target = new Target();
+        target.setId(registered.id());
+        target.setPort(registered.port());
+        return target;
+    }
+
+    private void forEachTarget(EcsTask task, List<EcsLoadBalancer> bindings,
                                BiConsumer<String, TargetDescription> action) {
-        if (svc == null || svc.getLoadBalancers() == null || svc.getLoadBalancers().isEmpty()) {
+        if (bindings == null || bindings.isEmpty()) {
             return;
         }
         if (task.getContainers() == null || task.getContainers().isEmpty()) {
             return;
         }
-        for (EcsLoadBalancer lb : svc.getLoadBalancers()) {
+        for (EcsLoadBalancer lb : bindings) {
             if (lb.getTargetGroupArn() == null || lb.getTargetGroupArn().isBlank()) {
                 continue;
             }

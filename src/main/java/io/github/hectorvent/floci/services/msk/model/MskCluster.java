@@ -201,4 +201,18 @@ public class MskCluster {
     public String getDockerVolumeName() { return dockerVolumeName; }
 
     public void setDockerVolumeName(String dockerVolumeName) { this.dockerVolumeName = dockerVolumeName; }
+
+    @JsonProperty("policy")
+    private String policy;
+
+    @JsonProperty("policyVersion")
+    private String policyVersion;
+
+    public String getPolicy() { return policy; }
+
+    public void setPolicy(String policy) { this.policy = policy; }
+
+    public String getPolicyVersion() { return policyVersion; }
+
+    public void setPolicyVersion(String policyVersion) { this.policyVersion = policyVersion; }
 }

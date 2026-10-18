@@ -16,7 +16,13 @@ Floci emulates Amazon MSK by orchestrating **Redpanda** containers. This provide
 | `DescribeCluster` | Get cluster metadata and state |
 | `DescribeClusterV2` | Get cluster metadata and state using V2 API |
 | `DeleteCluster` | Stops and removes the Redpanda container |
-| `GetBootstrapBrokers` | Get the connection strings for the cluster |
+| `GetBootstrapBrokers` | Get the connection strings for the cluster, including the TLS and IAM listeners |
+| `UpdateConnectivity` | Turn on multi-VPC private connectivity (or public access); completes at once |
+| `DescribeClusterOperation` | Report an operation, always `UPDATE_COMPLETE` |
+| `PutClusterPolicy` / `GetClusterPolicy` / `DeleteClusterPolicy` | Store the cluster's resource policy with a version; not evaluated |
+| `CreateVpcConnection` / `DescribeVpcConnection` / `ListVpcConnections` / `DeleteVpcConnection` | Multi-VPC connections, from any account, to a cluster by ARN |
+| `ListClientVpcConnections` | The VPC connections made to a cluster |
+| `CreateTopic` / `DescribeTopic` / `ListTopics` / `UpdateTopic` / `DeleteTopic` | Topics, created on the broker with `rpk` |
 | `BatchAssociateScramSecret` | Associate secret SCRAM credential with cluster |
 | `ListScramSecrets` | List the secret ARNs associated with a cluster |
 | `BatchDisassociateScramSecret` | Remove secret SCRAM credential associated with cluster |
@@ -52,6 +58,45 @@ When `mock` is set to `false` (default), Floci uses the Docker API to start a Re
     - Floci in a container: the broker has two listeners. `internal` (9092) advertises `<container-name>:9092` for containers on the same Docker network. `host` (9093) is published on a host port from the `kafka-host-port` range and advertised as `<bootstrap-hostname or localhost>:<port>` for clients on the Docker host. `GetBootstrapBrokers` returns the Docker-network address. When `FLOCI_SERVICES_MSK_BOOTSTRAP_HOSTNAME` is set, it returns both listeners, `<container-name>:9092,<hostname>:<port>`: a client connects through whichever entry it can reach, and the broker then advertises that listener's address. The two entries are two listeners on the same broker, not two brokers.
 - **Persistence**: Each cluster gets a named Docker volume (`floci-msk-{volumeId}`). In memory mode the volume is removed on cluster delete; in persistent modes it is retained unless `FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE=true`.
 - **Readiness**: The cluster state transitions to `ACTIVE` once the Redpanda `/ready` endpoint is reachable.
+
+## TLS and IAM listeners
+
+A cluster with TLS in transit gets the listeners MSK gives it, served on Floci's address by a front
+end in front of its Redpanda broker:
+
+| Listener | Bootstrap member | Host and port |
+|---|---|---|
+| TLS, no authentication | `BootstrapBrokerStringTls` | `b-N.<cluster>.<id>.c1.kafka.<region>.amazonaws.com:9094` |
+| SASL/IAM | `BootstrapBrokerStringSaslIam` | `b-N.<cluster>.<id>.c1.kafka.<region>.amazonaws.com:9098` |
+| Multi-VPC SASL/IAM | `BootstrapBrokerStringVpcConnectivitySaslIam` | `b-N.iam.<cluster>.<id>.c1.kafka.<region>.amazonaws.com:1400N` |
+
+The TLS listener is there when unauthenticated or TLS client authentication is on, the IAM one when
+`clientAuthentication.sasl.iam` is on, and the multi-VPC one when
+`connectivityInfo.vpcConnectivity` enables IAM. `N` runs over `numberOfBrokerNodes`.
+
+- **DNS**: the embedded DNS server resolves every broker name to Floci, for ECS tasks and any other
+  container that uses it. In AWS the multi-VPC names resolve only in a VPC with a connection; here
+  they resolve everywhere.
+- **TLS** is terminated with a certificate the Floci root CA issues for the cluster's broker names,
+  chosen by SNI. Clients trust it through the CA bundle (ECS tasks get it with
+  `FLOCI_TLS_ENABLED=true`, as `NODE_EXTRA_CA_CERTS` and friends) or `GET /_floci/ca.pem`.
+- **SASL**: `AWS_MSK_IAM` (as `@jm18457/kafkajs-msk-iam-authentication-mechanism` and the AWS MSK
+  IAM libraries send it) and `OAUTHBEARER` (an `aws-msk-iam-sasl-signer` token) are answered by the
+  front end. A payload is accepted when it is well formed: version `2020_10_22`, action
+  `kafka-cluster:Connect`, a `kafka-cluster` credential scope, a date and a signature. The signature
+  is not verified and IAM policies are not evaluated, so any signed client is let in. A client that
+  sends anything but `ApiVersions` before authenticating on an IAM listener is disconnected.
+- **Brokers**: every broker name leads to the cluster's single Redpanda node. Metadata and
+  FindCoordinator responses advertise broker 1 of the listener the client came in on, so a client
+  keeps using that listener family. The front end caps `Metadata` at v8 and `FindCoordinator` at v3
+  in its `ApiVersions` answer, which clients negotiate down to.
+- Topics created through `CreateTopic` get one replica on the broker, whatever factor was asked for;
+  the requested factor is what the API reports. `ListTopics` and `DescribeTopic` report the topics
+  the topic API manages, not ones a client created on the broker directly. `ListTopics`,
+  `ListVpcConnections` and `ListClientVpcConnections` return every result in one page.
+- **Ports**: the front end binds 9094, 9098 and 14001 upward on every interface of the Floci host
+  while an active cluster has a listener on them, and closes a port once none does. The ports are
+  fixed, as MSK's are; `FLOCI_SERVICES_MSK_MOCK=true` binds none.
 
 ## Cluster metadata
 

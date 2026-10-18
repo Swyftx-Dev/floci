@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -700,6 +701,57 @@ class RamIntegrationTest {
             .body("resources[0].arn", equalTo(tgwArn))
             .body("resources[0].type", equalTo("ec2:TransitGateway"))
             .body("resources[0].resourceShareArn", equalTo(shareArn));
+    }
+
+    @Test
+    @Order(2)
+    void getResourceShareAssociationsListsResourcesAndPrincipals() {
+        String networkArn = "arn:aws:vpc-lattice:us-east-1:000000000000:servicenetwork/sn-0123456789abcdef0";
+        String shareArn =
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                    {
+                        "name": "lattice-share",
+                        "principals": ["111111111111"],
+                        "resourceArns": ["%s"],
+                        "tags": [{"key": "Name", "value": "lattice-share"}]
+                    }
+                    """.formatted(networkArn))
+            .when()
+                .post("/createresourceshare")
+            .then()
+                .statusCode(200)
+                .body("resourceShare.tags[0].key", equalTo("Name"))
+            .extract().path("resourceShare.resourceShareArn");
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                { "associationType": "RESOURCE", "resourceShareArns": ["%s"], "resourceArn": "%s" }
+                """.formatted(shareArn, networkArn))
+        .when()
+            .post("/getresourceshareassociations")
+        .then()
+            .statusCode(200)
+            .body("resourceShareAssociations.size()", equalTo(1))
+            .body("resourceShareAssociations[0].associatedEntity", equalTo(networkArn))
+            .body("resourceShareAssociations[0].associationType", equalTo("RESOURCE"))
+            .body("resourceShareAssociations[0].status", equalTo("ASSOCIATED"));
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                { "associationType": "PRINCIPAL", "resourceShareArns": ["%s"], "principal": "111111111111" }
+                """.formatted(shareArn))
+        .when()
+            .post("/getresourceshareassociations")
+        .then()
+            .statusCode(200)
+            .body("resourceShareAssociations.associatedEntity", contains("111111111111"));
     }
 
     @Test

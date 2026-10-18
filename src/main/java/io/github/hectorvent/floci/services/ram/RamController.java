@@ -98,6 +98,14 @@ public class RamController {
                 allowExternalPrincipals,
                 regionResolver.resolveRegion(headers),
                 regionResolver.getAccountId());
+        Map<String, String> tags = new LinkedHashMap<>();
+        request.path("tags").forEach(tag -> tags.put(tag.path("key").asText(), tag.path("value").asText()));
+        if (!tags.isEmpty()) {
+            String region = regionResolver.resolveRegion(headers);
+            service.tagResource(share.getResourceShareArn(), tags, regionResolver.getAccountId(), region);
+            share = service.getResourceShares(regionResolver.getAccountId(), "SELF", null,
+                    List.of(share.getResourceShareArn()), null, region).getFirst();
+        }
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("resourceShare", shareNode(share));
@@ -194,6 +202,39 @@ public class RamController {
         ObjectNode response = objectMapper.createObjectNode();
         response.set("resourceShareAssociations",
                 associationArray(updated, resourceArns, principals, "DISASSOCIATED"));
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/getresourceshareassociations")
+    @Consumes(MediaType.WILDCARD)
+    public Response getResourceShareAssociations(String body) {
+        JsonNode request = readTree(body);
+        String associationType = request.path("associationType").asText(null);
+        if (!"PRINCIPAL".equals(associationType) && !"RESOURCE".equals(associationType)) {
+            throw new AwsException("InvalidParameterException",
+                    "associationType must be PRINCIPAL or RESOURCE.", 400);
+        }
+        String resourceArn = request.hasNonNull("resourceArn") ? request.path("resourceArn").asText() : null;
+        String principal = request.hasNonNull("principal") ? request.path("principal").asText() : null;
+        String status = request.hasNonNull("associationStatus") ? request.path("associationStatus").asText() : null;
+        ArrayNode array = objectMapper.createArrayNode();
+        // Only live associations are kept, so every one is ASSOCIATED.
+        if (status == null || "ASSOCIATED".equals(status)) {
+            for (ResourceShare share : service.getResourceShares(regionResolver.getAccountId(), "SELF", null,
+                    stringList(request.path("resourceShareArns")), null, regionResolver.getRegion())) {
+                boolean resources = "RESOURCE".equals(associationType);
+                String wanted = resources ? resourceArn : principal;
+                for (String entity : resources ? share.getResourceArns() : share.getPrincipals()) {
+                    if (wanted == null || wanted.equals(entity)) {
+                        array.add(associationNode(share, entity, associationType, "ASSOCIATED",
+                                share.getLastUpdatedTime().toEpochMilli() / 1000.0));
+                    }
+                }
+            }
+        }
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("resourceShareAssociations", array);
         return Response.ok(response).build();
     }
 

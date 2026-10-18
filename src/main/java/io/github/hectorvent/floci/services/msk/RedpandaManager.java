@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
@@ -254,6 +255,25 @@ public class RedpandaManager {
 
         specBuilder.withCmd(cmd);
         return specBuilder.build();
+    }
+
+    /**
+     * Runs {@code rpk} in the cluster's broker, for the topic operations MSK exposes over its API.
+     * A broker of one node holds one replica of everything, whatever factor was asked for.
+     */
+    public void rpk(MskCluster cluster, List<String> args) {
+        if (cluster.getContainerId() == null) {
+            return;
+        }
+        List<String> cmd = new ArrayList<>();
+        cmd.add("rpk");
+        cmd.addAll(args);
+        ContainerExec.Result result = ContainerExec.runMerged(lifecycleManager.getDockerClient(),
+                cluster.getContainerId(), cmd.toArray(String[]::new), 30);
+        if (result.timedOut() || result.exitCode() != 0) {
+            LOG.warnv("rpk {0} on MSK cluster {1} failed: {2}", String.join(" ", args), cluster.getClusterName(),
+                    result.stdout());
+        }
     }
 
     public boolean isReady(MskCluster cluster) {

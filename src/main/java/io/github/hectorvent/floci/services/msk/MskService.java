@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.msk;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -20,26 +21,35 @@ import io.github.hectorvent.floci.services.msk.model.ConfigurationInfo;
 import io.github.hectorvent.floci.services.msk.model.ConfigurationRevision;
 import io.github.hectorvent.floci.services.msk.model.ConfigurationRevisionDetail;
 import io.github.hectorvent.floci.services.msk.model.ConfigurationState;
+import io.github.hectorvent.floci.services.msk.model.ConnectivityInfo;
 import io.github.hectorvent.floci.services.msk.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.msk.model.CreateClusterV2Request;
 import io.github.hectorvent.floci.services.msk.model.EncryptionInTransit;
 import io.github.hectorvent.floci.services.msk.model.EncryptionInfo;
 import io.github.hectorvent.floci.services.msk.model.MskCluster;
 import io.github.hectorvent.floci.services.msk.model.MskConfiguration;
+import io.github.hectorvent.floci.services.msk.model.MskTopic;
+import io.github.hectorvent.floci.services.msk.model.MskVpcConnection;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -48,6 +58,7 @@ import java.util.concurrent.TimeUnit;
 public class MskService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(MskService.class);
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final String DEFAULT_KAFKA_VERSION = "3.6.0";
     private static final String DEFAULT_ENHANCED_MONITORING = "DEFAULT";
     private static final String DEFAULT_CLIENT_BROKER_ENCRYPTION = "TLS_PLAINTEXT";
@@ -73,21 +84,36 @@ public class MskService implements ResourceProvider {
     private static final Set<String> REBALANCING_STATUS_VALUES = Set.of("PAUSED", "ACTIVE");
     private final StorageBackend<String, MskCluster> storage;
     private final StorageBackend<String, MskConfiguration> configurationStorage;
+    private final StorageBackend<String, MskVpcConnection> vpcConnectionStorage;
+    private final StorageBackend<String, MskTopic> topicStorage;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final RedpandaManager redpandaManager;
+    private final MskBrokerFrontEnd frontEnd;
+    // Operations complete as they are requested, so they are kept only for DescribeClusterOperation.
+    private final Map<String, Map<String, Object>> operations = new ConcurrentHashMap<>();
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
     private final Object configurationUpdateLock = new Object();
 
-    @Inject
     public MskService(StorageFactory storageFactory, EmulatorConfig config,
                       RegionResolver regionResolver, RedpandaManager redpandaManager) {
+        this(storageFactory, config, regionResolver, redpandaManager, null);
+    }
+
+    @Inject
+    public MskService(StorageFactory storageFactory, EmulatorConfig config,
+                      RegionResolver regionResolver, RedpandaManager redpandaManager, MskBrokerFrontEnd frontEnd) {
         this.storage = storageFactory.create("msk", "msk-clusters.json", new TypeReference<Map<String, MskCluster>>() {});
         this.configurationStorage = storageFactory.create("msk", "msk-configurations.json",
                 new TypeReference<Map<String, MskConfiguration>>() {});
+        this.vpcConnectionStorage = storageFactory.create("msk", "msk-vpc-connections.json",
+                new TypeReference<Map<String, MskVpcConnection>>() {});
+        this.topicStorage = storageFactory.create("msk", "msk-topics.json",
+                new TypeReference<Map<String, MskTopic>>() {});
         this.config = config;
         this.regionResolver = regionResolver;
         this.redpandaManager = redpandaManager;
+        this.frontEnd = frontEnd;
     }
 
     @PostConstruct
@@ -419,6 +445,257 @@ public class MskService implements ResourceProvider {
         return cluster.getBootstrapBrokers();
     }
 
+    /** Every bootstrap string the cluster's listeners give, keyed by the response member name. */
+    public Map<String, String> bootstrapBrokerStrings(String clusterArn) {
+        MskCluster cluster = clusterInAnyAccount(clusterArn);
+        Map<String, String> strings = new LinkedHashMap<>();
+        if (cluster.getBootstrapBrokers() != null) {
+            strings.put("bootstrapBrokerString", cluster.getBootstrapBrokers());
+        }
+        putIfPresent(strings, "bootstrapBrokerStringTls",
+                MskBrokerEndpoints.bootstrapString(cluster, MskBrokerEndpoints.Family.TLS));
+        putIfPresent(strings, "bootstrapBrokerStringSaslIam",
+                MskBrokerEndpoints.bootstrapString(cluster, MskBrokerEndpoints.Family.SASL_IAM));
+        putIfPresent(strings, "bootstrapBrokerStringVpcConnectivitySaslIam",
+                MskBrokerEndpoints.bootstrapString(cluster, MskBrokerEndpoints.Family.VPC_CONNECTIVITY_SASL_IAM));
+        return strings;
+    }
+
+    private static void putIfPresent(Map<String, String> map, String key, String value) {
+        if (value != null) {
+            map.put(key, value);
+        }
+    }
+
+    /** By ARN in the ARN's own account, as a cluster shared through its cluster policy is reached. */
+    public MskCluster clusterInAnyAccount(String clusterArn) {
+        if (storage instanceof AccountAwareStorageBackend<MskCluster> aware && AwsArnUtils.isArn(clusterArn)) {
+            String account = AwsArnUtils.parse(clusterArn).accountId();
+            Optional<MskCluster> cluster = aware.getForAccount(account, clusterArn);
+            if (cluster.isPresent()) {
+                return cluster.get();
+            }
+        }
+        return describeCluster(clusterArn);
+    }
+
+    /** Every cluster in every account, for the broker front end. */
+    public List<MskCluster> clustersInAllAccounts() {
+        return allClusters();
+    }
+
+    /** Applies the connectivity at once; the returned operation already reports UPDATE_COMPLETE. */
+    public String updateConnectivity(String clusterArn, ConnectivityInfo connectivity, String currentVersion) {
+        MskCluster cluster = describeCluster(clusterArn);
+        if (currentVersion == null) {
+            throw badRequest("currentVersion", "currentVersion is required.");
+        }
+        if (!currentVersion.equals(cluster.getCurrentVersion())) {
+            throw new AwsException("BadRequestException",
+                    "The specified currentVersion does not match the cluster's current version.", 400);
+        }
+        BrokerNodeGroupInfo nodes = cluster.getBrokerNodeGroupInfo() != null
+                ? cluster.getBrokerNodeGroupInfo() : new BrokerNodeGroupInfo();
+        ConnectivityInfo current = nodes.getConnectivityInfo() != null ? nodes.getConnectivityInfo() : new ConnectivityInfo();
+        if (connectivity != null) {
+            if (connectivity.getVpcConnectivity() != null) {
+                current.setVpcConnectivity(connectivity.getVpcConnectivity());
+            }
+            if (connectivity.getPublicAccess() != null) {
+                current.setPublicAccess(connectivity.getPublicAccess());
+            }
+            if (connectivity.getNetworkType() != null) {
+                current.setNetworkType(connectivity.getNetworkType());
+            }
+        }
+        nodes.setConnectivityInfo(current);
+        cluster.setBrokerNodeGroupInfo(nodes);
+        cluster.setCurrentVersion(Long.toString(System.nanoTime(), 36).toUpperCase(Locale.ROOT));
+        putCluster(cluster);
+        String operationArn = clusterArn.replace(":cluster/", ":cluster-operation/") + "/" + UUID.randomUUID();
+        Map<String, Object> operation = new LinkedHashMap<>();
+        operation.put("clusterArn", clusterArn);
+        operation.put("operationArn", operationArn);
+        operation.put("operationType", "UPDATE_CONNECTIVITY");
+        operation.put("operationState", "UPDATE_COMPLETE");
+        operation.put("creationTime", Instant.now().toString());
+        operation.put("endTime", Instant.now().toString());
+        operations.put(operationArn, operation);
+        return operationArn;
+    }
+
+    public Map<String, Object> describeClusterOperation(String operationArn) {
+        Map<String, Object> operation = operations.get(operationArn);
+        if (operation == null) {
+            throw new AwsException("NotFoundException", "Cluster operation not found: " + operationArn, 404);
+        }
+        return operation;
+    }
+
+    public String putClusterPolicy(String clusterArn, String policy, String currentVersion) {
+        MskCluster cluster = describeCluster(clusterArn);
+        if (policy == null || policy.isBlank()) {
+            throw badRequest("policy", "policy is required.");
+        }
+        if (currentVersion != null && !currentVersion.equals(cluster.getPolicyVersion())) {
+            throw new AwsException("BadRequestException", "currentVersion does not match the policy's version.", 400);
+        }
+        cluster.setPolicy(policy);
+        cluster.setPolicyVersion(Long.toString(System.nanoTime(), 36).toUpperCase(Locale.ROOT));
+        putCluster(cluster);
+        return cluster.getPolicyVersion();
+    }
+
+    public MskCluster getClusterPolicy(String clusterArn) {
+        MskCluster cluster = describeCluster(clusterArn);
+        if (cluster.getPolicy() == null) {
+            throw new AwsException("NotFoundException", "No policy is attached to " + clusterArn, 404);
+        }
+        return cluster;
+    }
+
+    public void deleteClusterPolicy(String clusterArn) {
+        MskCluster cluster = describeCluster(clusterArn);
+        cluster.setPolicy(null);
+        cluster.setPolicyVersion(null);
+        putCluster(cluster);
+    }
+
+    public MskVpcConnection createVpcConnection(String targetClusterArn, String authentication, String vpcId,
+                                                List<String> clientSubnets, List<String> securityGroups,
+                                                Map<String, String> tags) {
+        if (targetClusterArn == null || authentication == null || vpcId == null) {
+            throw badRequest("targetClusterArn", "targetClusterArn, authentication and vpcId are required.");
+        }
+        MskCluster cluster = clusterInAnyAccount(targetClusterArn);
+        MskVpcConnection connection = new MskVpcConnection();
+        String accountId = regionResolver.getAccountId();
+        connection.setVpcConnectionArn(AwsArnUtils.Arn.of("kafka", regionResolver.getRegion(), accountId,
+                "vpc-connection/" + accountId + "/" + cluster.getClusterName() + "/" + UUID.randomUUID()).toString());
+        connection.setTargetClusterArn(targetClusterArn);
+        connection.setAuthentication(authentication);
+        connection.setVpcId(vpcId);
+        connection.setClientSubnets(clientSubnets != null ? clientSubnets : List.of());
+        connection.setSecurityGroups(securityGroups != null ? securityGroups : List.of());
+        connection.setCreationTime(Instant.now());
+        connection.setState("AVAILABLE");
+        connection.setAccountId(accountId);
+        connection.setRegion(regionResolver.getRegion());
+        connection.setTags(tags != null ? new HashMap<>(tags) : new HashMap<>());
+        vpcConnectionStorage.put(connection.getVpcConnectionArn(), connection);
+        return connection;
+    }
+
+    public MskVpcConnection describeVpcConnection(String arn) {
+        return vpcConnectionStorage.get(arn)
+                .orElseThrow(() -> new AwsException("NotFoundException", "VPC connection not found: " + arn, 404));
+    }
+
+    public List<MskVpcConnection> listVpcConnections() {
+        return vpcConnectionStorage.scan(k -> true).stream()
+                .filter(c -> regionResolver.getRegion().equals(c.getRegion())).toList();
+    }
+
+    public MskVpcConnection deleteVpcConnection(String arn) {
+        MskVpcConnection connection = describeVpcConnection(arn);
+        vpcConnectionStorage.delete(arn);
+        connection.setState("DELETING");
+        return connection;
+    }
+
+    public MskTopic createTopic(String clusterArn, String topicName, Integer partitionCount,
+                                Integer replicationFactor, String configs) {
+        MskCluster cluster = describeCluster(clusterArn);
+        if (topicName == null || topicName.isBlank() || partitionCount == null || partitionCount < 1
+                || replicationFactor == null || replicationFactor < 1) {
+            throw badRequest("topicName", "topicName, partitionCount and replicationFactor are required.");
+        }
+        String key = topicKey(clusterArn, topicName);
+        if (topicStorage.get(key).isPresent()) {
+            throw new AwsException("ConflictException", "Topic already exists: " + topicName, 409);
+        }
+        MskTopic topic = new MskTopic();
+        topic.setTopicArn(clusterArn.replace(":cluster/", ":topic/") + "/" + topicName);
+        topic.setClusterArn(clusterArn);
+        topic.setTopicName(topicName);
+        topic.setPartitionCount(partitionCount);
+        topic.setReplicationFactor(replicationFactor);
+        topic.setConfigs(configs);
+        if (!config.services().msk().mock()) {
+            List<String> args = new ArrayList<>(List.of("topic", "create", topicName,
+                    "-p", String.valueOf(partitionCount), "-r", "1"));
+            topicConfigs(configs).forEach((k, v) -> args.addAll(List.of("-c", k + "=" + v)));
+            redpandaManager.rpk(cluster, args);
+        }
+        topicStorage.put(key, topic);
+        return topic;
+    }
+
+    public MskTopic describeTopic(String clusterArn, String topicName) {
+        describeCluster(clusterArn);
+        return topicStorage.get(topicKey(clusterArn, topicName))
+                .orElseThrow(() -> new AwsException("NotFoundException", "Topic not found: " + topicName, 404));
+    }
+
+    public List<MskTopic> listTopics(String clusterArn) {
+        describeCluster(clusterArn);
+        return topicStorage.scan(k -> true).stream().filter(t -> clusterArn.equals(t.getClusterArn())).toList();
+    }
+
+    public MskTopic updateTopic(String clusterArn, String topicName, Integer partitionCount, String configs) {
+        MskTopic topic = describeTopic(clusterArn, topicName);
+        MskCluster cluster = describeCluster(clusterArn);
+        if (partitionCount != null && partitionCount != topic.getPartitionCount()) {
+            if (partitionCount < topic.getPartitionCount()) {
+                throw badRequest("partitionCount", "The partition count can only be increased.");
+            }
+            if (!config.services().msk().mock()) {
+                redpandaManager.rpk(cluster, List.of("topic", "add-partitions", topicName,
+                        "--num", String.valueOf(partitionCount - topic.getPartitionCount())));
+            }
+            topic.setPartitionCount(partitionCount);
+        }
+        if (configs != null) {
+            topic.setConfigs(configs);
+            if (!config.services().msk().mock() && !topicConfigs(configs).isEmpty()) {
+                List<String> args = new ArrayList<>(List.of("topic", "alter-config", topicName));
+                topicConfigs(configs).forEach((k, v) -> args.addAll(List.of("--set", k + "=" + v)));
+                redpandaManager.rpk(cluster, args);
+            }
+        }
+        topicStorage.put(topicKey(clusterArn, topicName), topic);
+        return topic;
+    }
+
+    public MskTopic deleteTopic(String clusterArn, String topicName) {
+        MskTopic topic = describeTopic(clusterArn, topicName);
+        if (!config.services().msk().mock()) {
+            redpandaManager.rpk(describeCluster(clusterArn), List.of("topic", "delete", topicName));
+        }
+        topicStorage.delete(topicKey(clusterArn, topicName));
+        return topic;
+    }
+
+    private static String topicKey(String clusterArn, String topicName) {
+        return clusterArn + "|" + topicName;
+    }
+
+    /** The topic API carries configs as base64 of a JSON object of strings. */
+    private static Map<String, String> topicConfigs(String configs) {
+        Map<String, String> result = new LinkedHashMap<>();
+        if (configs == null || configs.isBlank()) {
+            return result;
+        }
+        try {
+            String json = new String(Base64.getDecoder().decode(configs), StandardCharsets.UTF_8);
+            JSON.readTree(json).fields()
+                    .forEachRemaining(e -> result.put(e.getKey(), e.getValue().asText()));
+        } catch (Exception e) {
+            throw new AwsException("BadRequestException", "configs must be base64-encoded JSON.", 400);
+        }
+        return result;
+    }
+
     public MskConfiguration createConfiguration(String name, String description,
                                                  List<String> kafkaVersions, String serverProperties) {
         if (name == null || name.isBlank()) {
@@ -562,6 +839,10 @@ public class MskService implements ResourceProvider {
         if (configuration != null) {
             return configuration.getTags() != null ? configuration.getTags() : Map.of();
         }
+        MskVpcConnection connection = vpcConnectionStorage.get(arn).orElse(null);
+        if (connection != null) {
+            return connection.getTags() != null ? connection.getTags() : Map.of();
+        }
         throw taggedResourceNotFound(arn);
     }
 
@@ -578,6 +859,12 @@ public class MskService implements ResourceProvider {
             configurationStorage.put(arn, configuration);
             return;
         }
+        MskVpcConnection connection = vpcConnectionStorage.get(arn).orElse(null);
+        if (connection != null) {
+            connection.setTags(merged(connection.getTags(), tags));
+            vpcConnectionStorage.put(arn, connection);
+            return;
+        }
         throw taggedResourceNotFound(arn);
     }
 
@@ -592,6 +879,12 @@ public class MskService implements ResourceProvider {
         if (configuration != null) {
             configuration.setTags(without(configuration.getTags(), tagKeys));
             configurationStorage.put(arn, configuration);
+            return;
+        }
+        MskVpcConnection connection = vpcConnectionStorage.get(arn).orElse(null);
+        if (connection != null) {
+            connection.setTags(without(connection.getTags(), tagKeys));
+            vpcConnectionStorage.put(arn, connection);
             return;
         }
         throw taggedResourceNotFound(arn);
@@ -631,6 +924,9 @@ public class MskService implements ResourceProvider {
                             putCluster(cluster);
                         }
                     }
+                }
+                if (frontEnd != null) {
+                    frontEnd.sync(allClusters());
                 }
             } catch (Exception e) {
                 LOG.error("Error in MSK readiness poller", e);

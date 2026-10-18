@@ -66,7 +66,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [RDS](rds.md) | `POST /` with `Action=` param + TCP proxy | Query + wire | 105 |
 | [RDS Data API](rds-data.md) | `/Execute`, `/BeginTransaction`, `/CommitTransaction`, `/RollbackTransaction` | REST JSON | 4 |
 | [Timestream for InfluxDB](timestream-influxdb.md) | `POST /` + `X-Amz-Target: AmazonTimestreamInfluxDB.*` + InfluxDB container | JSON 1.0 + InfluxDB HTTP | 24 |
-| [MSK](msk.md) | `/v1/clusters/...`, `/api/v2/clusters/...` + Redpanda broker | REST JSON + Kafka | 8 |
+| [MSK](msk.md) | `/v1/clusters/...`, `/api/v2/clusters/...`, `/v1/vpc-connection...` + Redpanda broker behind a TLS/IAM front end | REST JSON + Kafka | 33 |
 | [Amazon MQ](amazonmq.md) | `/v1/brokers/...` + RabbitMQ broker | REST JSON + AMQP | 5 |
 | [MWAA](mwaa.md) | `/` REST paths for environments + CLI/web proxy | REST JSON | 10 |
 | [Athena](athena.md) | `POST /` + `X-Amz-Target: AmazonAthena.*` | JSON 1.1 | 21 |

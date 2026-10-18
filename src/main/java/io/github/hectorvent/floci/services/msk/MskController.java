@@ -1,14 +1,18 @@
 package io.github.hectorvent.floci.services.msk;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.msk.model.ConfigurationRevision;
 import io.github.hectorvent.floci.services.msk.model.ConfigurationRevisionDetail;
+import io.github.hectorvent.floci.services.msk.model.ConnectivityInfo;
 import io.github.hectorvent.floci.services.msk.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.msk.model.CreateClusterV2Request;
 import io.github.hectorvent.floci.services.msk.model.MskCluster;
 import io.github.hectorvent.floci.services.msk.model.MskConfiguration;
+import io.github.hectorvent.floci.services.msk.model.MskTopic;
+import io.github.hectorvent.floci.services.msk.model.MskVpcConnection;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
@@ -28,6 +32,7 @@ public class MskController {
     // Fallback for clusters persisted before clusterType was stored - everything written back
     // then was provisioned, since serverless had no representation at all.
     private static final String PROVISIONED_CLUSTER_TYPE = "PROVISIONED";
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final MskService mskService;
 
@@ -92,8 +97,186 @@ public class MskController {
     @GET
     @Path("/v1/clusters/{clusterArn}/bootstrap-brokers")
     public Response getBootstrapBrokers(@PathParam("clusterArn") String clusterArn) {
-        String bootstrapBrokers = mskService.getBootstrapBrokers(clusterArn);
-        return Response.ok(Map.of("bootstrapBrokerString", bootstrapBrokers)).build();
+        return Response.ok(mskService.bootstrapBrokerStrings(clusterArn)).build();
+    }
+
+    @PUT
+    @Path("/v1/clusters/{clusterArn}/connectivity")
+    public Response updateConnectivity(@PathParam("clusterArn") String clusterArn, Map<String, Object> request) {
+        ConnectivityInfo connectivity = request.get("connectivityInfo") == null ? null
+                : JSON.convertValue(request.get("connectivityInfo"), ConnectivityInfo.class);
+        String operationArn = mskService.updateConnectivity(clusterArn, connectivity,
+                asString(request.get("currentVersion"), "currentVersion"));
+        return Response.ok(Map.of("clusterArn", clusterArn, "clusterOperationArn", operationArn)).build();
+    }
+
+    @GET
+    @Path("/v1/operations/{clusterOperationArn}")
+    public Response describeClusterOperation(@PathParam("clusterOperationArn") String operationArn) {
+        return Response.ok(Map.of("clusterOperationInfo", mskService.describeClusterOperation(operationArn))).build();
+    }
+
+    @PUT
+    @Path("/v1/clusters/{clusterArn}/policy")
+    public Response putClusterPolicy(@PathParam("clusterArn") String clusterArn, Map<String, Object> request) {
+        String version = mskService.putClusterPolicy(clusterArn, asString(request.get("policy"), "policy"),
+                asString(request.get("currentVersion"), "currentVersion"));
+        return Response.ok(Map.of("currentVersion", version)).build();
+    }
+
+    @GET
+    @Path("/v1/clusters/{clusterArn}/policy")
+    public Response getClusterPolicy(@PathParam("clusterArn") String clusterArn) {
+        MskCluster cluster = mskService.getClusterPolicy(clusterArn);
+        return Response.ok(Map.of("policy", cluster.getPolicy(), "currentVersion", cluster.getPolicyVersion())).build();
+    }
+
+    @DELETE
+    @Path("/v1/clusters/{clusterArn}/policy")
+    public Response deleteClusterPolicy(@PathParam("clusterArn") String clusterArn) {
+        mskService.deleteClusterPolicy(clusterArn);
+        return Response.ok(Map.of()).build();
+    }
+
+    @POST
+    @Path("/v1/vpc-connection")
+    @SuppressWarnings("unchecked")
+    public Response createVpcConnection(Map<String, Object> request) {
+        MskVpcConnection connection = mskService.createVpcConnection(
+                asString(request.get("targetClusterArn"), "targetClusterArn"),
+                asString(request.get("authentication"), "authentication"),
+                asString(request.get("vpcId"), "vpcId"),
+                asStringList(request.get("clientSubnets"), "clientSubnets"),
+                asStringList(request.get("securityGroups"), "securityGroups"),
+                request.get("tags") instanceof Map<?, ?> tags ? (Map<String, String>) tags : null);
+        Map<String, Object> view = new HashMap<>();
+        view.put("vpcConnectionArn", connection.getVpcConnectionArn());
+        view.put("state", connection.getState());
+        view.put("authentication", connection.getAuthentication());
+        view.put("vpcId", connection.getVpcId());
+        view.put("clientSubnets", connection.getClientSubnets());
+        view.put("securityGroups", connection.getSecurityGroups());
+        view.put("creationTime", connection.getCreationTime().toString());
+        view.put("tags", connection.getTags());
+        return Response.ok(view).build();
+    }
+
+    @GET
+    @Path("/v1/vpc-connection/{arn}")
+    public Response describeVpcConnection(@PathParam("arn") String arn) {
+        MskVpcConnection connection = mskService.describeVpcConnection(arn);
+        Map<String, Object> view = vpcConnectionView(connection);
+        view.put("subnets", connection.getClientSubnets());
+        view.put("securityGroups", connection.getSecurityGroups());
+        view.put("tags", connection.getTags());
+        return Response.ok(view).build();
+    }
+
+    @GET
+    @Path("/v1/vpc-connections")
+    public Response listVpcConnections() {
+        return Response.ok(Map.of("vpcConnections",
+                mskService.listVpcConnections().stream().map(this::vpcConnectionView).toList())).build();
+    }
+
+    @GET
+    @Path("/v1/clusters/{clusterArn}/client-vpc-connections")
+    public Response listClientVpcConnections(@PathParam("clusterArn") String clusterArn) {
+        List<Map<String, Object>> connections = mskService.listVpcConnections().stream()
+                .filter(c -> clusterArn.equals(c.getTargetClusterArn()))
+                .map(c -> Map.<String, Object>of("vpcConnectionArn", c.getVpcConnectionArn(),
+                        "authentication", c.getAuthentication(), "state", c.getState(),
+                        "creationTime", c.getCreationTime().toString(), "owner", c.getAccountId()))
+                .toList();
+        return Response.ok(Map.of("clientVpcConnections", connections)).build();
+    }
+
+    @DELETE
+    @Path("/v1/vpc-connection/{arn}")
+    public Response deleteVpcConnection(@PathParam("arn") String arn) {
+        MskVpcConnection connection = mskService.deleteVpcConnection(arn);
+        return Response.ok(Map.of("vpcConnectionArn", connection.getVpcConnectionArn(),
+                "state", connection.getState())).build();
+    }
+
+    @POST
+    @Path("/v1/clusters/{clusterArn}/topics")
+    public Response createTopic(@PathParam("clusterArn") String clusterArn, Map<String, Object> request) {
+        MskTopic topic = mskService.createTopic(clusterArn, asString(request.get("topicName"), "topicName"),
+                asInteger(request.get("partitionCount"), "partitionCount"),
+                asInteger(request.get("replicationFactor"), "replicationFactor"),
+                asString(request.get("configs"), "configs"));
+        return Response.ok(Map.of("topicArn", topic.getTopicArn(), "topicName", topic.getTopicName(),
+                "status", "ACTIVE")).build();
+    }
+
+    @GET
+    @Path("/v1/clusters/{clusterArn}/topics")
+    public Response listTopics(@PathParam("clusterArn") String clusterArn) {
+        List<Map<String, Object>> topics = mskService.listTopics(clusterArn).stream()
+                .map(t -> Map.<String, Object>of("topicArn", t.getTopicArn(), "topicName", t.getTopicName(),
+                        "partitionCount", t.getPartitionCount(), "replicationFactor", t.getReplicationFactor(),
+                        "outOfSyncReplicaCount", 0))
+                .toList();
+        return Response.ok(Map.of("topics", topics)).build();
+    }
+
+    @GET
+    @Path("/v1/clusters/{clusterArn}/topics/{topicName}")
+    public Response describeTopic(@PathParam("clusterArn") String clusterArn,
+                                  @PathParam("topicName") String topicName) {
+        return Response.ok(topicView(mskService.describeTopic(clusterArn, topicName))).build();
+    }
+
+    @PUT
+    @Path("/v1/clusters/{clusterArn}/topics/{topicName}")
+    public Response updateTopic(@PathParam("clusterArn") String clusterArn, @PathParam("topicName") String topicName,
+                                Map<String, Object> request) {
+        MskTopic topic = mskService.updateTopic(clusterArn, topicName,
+                asInteger(request.get("partitionCount"), "partitionCount"), asString(request.get("configs"), "configs"));
+        return Response.ok(Map.of("topicArn", topic.getTopicArn(), "topicName", topic.getTopicName(),
+                "status", "ACTIVE")).build();
+    }
+
+    @DELETE
+    @Path("/v1/clusters/{clusterArn}/topics/{topicName}")
+    public Response deleteTopic(@PathParam("clusterArn") String clusterArn, @PathParam("topicName") String topicName) {
+        MskTopic topic = mskService.deleteTopic(clusterArn, topicName);
+        return Response.ok(Map.of("topicArn", topic.getTopicArn(), "topicName", topic.getTopicName(),
+                "status", "DELETING")).build();
+    }
+
+    private Map<String, Object> vpcConnectionView(MskVpcConnection connection) {
+        Map<String, Object> view = new HashMap<>();
+        view.put("vpcConnectionArn", connection.getVpcConnectionArn());
+        view.put("targetClusterArn", connection.getTargetClusterArn());
+        view.put("creationTime", connection.getCreationTime().toString());
+        view.put("authentication", connection.getAuthentication());
+        view.put("vpcId", connection.getVpcId());
+        view.put("state", connection.getState());
+        return view;
+    }
+
+    private Map<String, Object> topicView(MskTopic topic) {
+        Map<String, Object> view = new HashMap<>();
+        view.put("topicArn", topic.getTopicArn());
+        view.put("topicName", topic.getTopicName());
+        view.put("partitionCount", topic.getPartitionCount());
+        view.put("replicationFactor", topic.getReplicationFactor());
+        view.put("configs", topic.getConfigs() != null ? topic.getConfigs()
+                : Base64.getEncoder().encodeToString("{}".getBytes(StandardCharsets.UTF_8)));
+        view.put("status", "ACTIVE");
+        return view;
+    }
+
+    private Integer asInteger(Object value, String fieldName) {
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof Number number)) {
+            throw new AwsException("BadRequestException", fieldName + " must be an integer.", 400);
+        }
+        return number.intValue();
     }
 
     // ── Configurations ───────────────────────────────────────────────────────

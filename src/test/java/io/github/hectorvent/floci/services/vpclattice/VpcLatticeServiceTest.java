@@ -115,6 +115,30 @@ class VpcLatticeServiceTest {
     }
 
     @Test
+    void linkLocalDnsAnswersOnlyRegisteredTaskNamespaces() {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.VpcLatticeServiceConfig lattice = mock(EmulatorConfig.VpcLatticeServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.vpclattice()).thenReturn(lattice);
+        when(lattice.enabled()).thenReturn(true);
+        LatticeService svc = service.createService("ecs-loans", "AWS_IAM", "loans.prod.example.internal", null, null,
+                Map.of(), REGION);
+        VpcLatticeLinkLocalDns dns = new VpcLatticeLinkLocalDns(service, config);
+        dns.register("172.18.0.9");
+
+        assertEquals(List.of(VpcLatticeLinkLocalDns.ADDRESS),
+                dns.resolve("loans.prod.example.internal", 1, "172.18.0.9").orElseThrow().addresses());
+        assertEquals(List.of(VpcLatticeLinkLocalDns.ADDRESS),
+                dns.resolve(svc.getDnsEntry().getDomainName(), 1, "172.18.0.9").orElseThrow().addresses());
+        assertTrue(dns.resolve("loans.prod.example.internal", 1, "172.18.0.10").isEmpty());
+        assertTrue(dns.resolve("other.prod.example.internal", 1, "172.18.0.9").isEmpty());
+
+        dns.unregister("172.18.0.9");
+        assertTrue(dns.resolve("loans.prod.example.internal", 1, "172.18.0.9").isEmpty());
+    }
+
+    @Test
     void privateDnsHonoursTheSpecifiedDomains() {
         DnsOptions specified = new DnsOptions();
         specified.setPrivateDnsPreference("SPECIFIED_DOMAINS_ONLY");

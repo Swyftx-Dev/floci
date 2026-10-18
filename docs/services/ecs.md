@@ -65,8 +65,10 @@ instances and stop the tasks first, as on AWS.
 A task definition round-trips whole. Members Floci acts on are modelled
 (`ephemeralStorage`, `pidMode`, `ipcMode`, `runtimePlatform`, and at container level `dependsOn`,
 `startTimeout`, `stopTimeout`, `user`, `workingDirectory`, `readonlyRootFilesystem`,
-`environmentFiles`, `dockerLabels`, `repositoryCredentials` and the rest); everything else it does
-not act on, such as `proxyConfiguration`, `linuxParameters`, `ulimits`, `resourceRequirements`,
+`environmentFiles`, `dockerLabels`, `repositoryCredentials` and the rest);
+`linuxParameters.capabilities.add` and `.drop` are applied to the container, as `NET_ADMIN` for an
+iptables init container needs. Everything else it does
+not act on, such as `proxyConfiguration`, the rest of `linuxParameters`, `ulimits`, `resourceRequirements`,
 `systemControls` and placement constraints, is kept verbatim and returned as registered. A client
 that reads back what it wrote (Terraform, or a deploy tool verifying its own
 `RegisterTaskDefinition`) sees no drift. `runtimePlatform` does not change where a local task
@@ -158,9 +160,9 @@ An injected `http://` endpoint also gets `tls Off`. Fluent Bit 1.9 (the `aws-for
 and `:latest` line) still calls `flb_tls_session_create` on HTTP S3 and SIGSEGVs on a NULL
 TLS context; the scheme alone is not enough. A `tls` the task definition already set is left
 alone.
-The TCP forward listens on `0.0.0.0` rather than AWS's awsvpc `127.0.0.1` because Floci only
-shares a network namespace when security-group enforcement is enabled for an awsvpc task. In every
-other case, the injected `FLUENT_HOST` (the router's container IP) must be reachable. Fluent Bit
+The TCP forward listens on `0.0.0.0` rather than AWS's awsvpc `127.0.0.1` because a bridge task's
+containers do not share a network namespace, so the injected `FLUENT_HOST` (the router's container
+IP) must be reachable. An awsvpc task's containers share one, and `FLUENT_HOST` is `127.0.0.1`. Fluent Bit
 config is written to `/fluent-bit/etc/fluent-bit.conf`. Fluentd config is
 written to `/fluentd/etc/fluent.conf` and uses `@type` (not `Name`) for output plugins; Floci
 does not inject an `endpoint` into Fluentd outputs.
@@ -829,9 +831,10 @@ writes `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` into every container in the task
 **A user-defined Docker network is required.** Set `FLOCI_SERVICES_ECS_DOCKER_NETWORK` to a network
 you created; the default bridge will not work. The SDKs hardcode `169.254.170.2` for this endpoint,
 so Floci runs a small proxy container that holds that address on the task's network and forwards to
-`FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_PORT`. Each task container is also given its own address
-in `169.254.0.0/16`, without which it would have no route to the endpoint at all. Docker only
-allows both of those on a user-defined network.
+`FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_PORT`. Each task is also given its own address in
+`169.254.0.0/16` (an awsvpc task on its shared namespace, a bridge task per container), without
+which it would have no route to the endpoint at all. Docker only allows both of those on a
+user-defined network.
 
 ```bash
 docker network create floci-net
@@ -969,6 +972,16 @@ services:
     environment:
       FLOCI_SERVICES_ECS_DOCKER_NETWORK: aws-local_default
 ```
+
+### awsvpc task network namespace
+
+With a Docker network configured and security-group enforcement off, an `awsvpc` task gets one
+network namespace for all its containers, as the ECS agent's pause container provides on AWS: a
+small `<task>-internal-ecs-pause` container joins the network, holds the task's address, its
+link-local address and its published ports, and every task container joins its namespace. The
+containers share `localhost` and iptables rules, so a sidecar such as an iptables init container
+plus an outbound proxy works unchanged. The pause container is removed with the task. Load
+balancer and Lattice targets register at its address.
 
 ### Host access to awsvpc task ports
 

@@ -105,6 +105,7 @@ public class EmbeddedDnsServer {
     private final Iterable<DnsRecordSource> recordSources;
     private final Iterable<DnsForwardingRuleSource> forwardingRuleSources;
     private final Iterable<DnsClientVpcSource> clientVpcSources;
+    private final Iterable<DnsClientRecordSource> clientRecordSources;
 
     EmbeddedDnsServer(List<String> suffixes) {
         this(suffixes, List.of());
@@ -133,18 +134,28 @@ public class EmbeddedDnsServer {
     EmbeddedDnsServer(List<String> suffixes, Iterable<DnsRecordSource> recordSources,
                       Iterable<DnsForwardingRuleSource> forwardingRuleSources,
                       Iterable<DnsClientVpcSource> clientVpcSources) {
+        this(suffixes, recordSources, forwardingRuleSources, clientVpcSources, List.of());
+    }
+
+    EmbeddedDnsServer(List<String> suffixes, Iterable<DnsRecordSource> recordSources,
+                      Iterable<DnsForwardingRuleSource> forwardingRuleSources,
+                      Iterable<DnsClientVpcSource> clientVpcSources,
+                      Iterable<DnsClientRecordSource> clientRecordSources) {
         this.suffixes.addAll(BUILTIN_SUFFIXES);
         this.suffixes.addAll(suffixes);
         this.recordSources = recordSources;
         this.forwardingRuleSources = forwardingRuleSources;
         this.clientVpcSources = clientVpcSources;
+        this.clientRecordSources = clientRecordSources;
     }
 
     @Inject
     public EmbeddedDnsServer(EmulatorConfig config, ContainerDetector containerDetector, Vertx vertx,
                              Instance<DnsRecordSource> recordSources,
                              Instance<DnsForwardingRuleSource> forwardingRuleSources,
-                             Instance<DnsClientVpcSource> clientVpcSources) {
+                             Instance<DnsClientVpcSource> clientVpcSources,
+                             Instance<DnsClientRecordSource> clientRecordSources) {
+        this.clientRecordSources = clientRecordSources;
         this.recordSources = recordSources;
         this.forwardingRuleSources = forwardingRuleSources;
         this.clientVpcSources = clientVpcSources;
@@ -294,6 +305,10 @@ public class EmbeddedDnsServer {
      * hosted zone that matches the same name.
      */
     QueryPlan planQuery(String name, String clientAddress, String myIp, int type) {
+        Optional<DnsAnswer> clientScoped = resolveForClient(name, type, clientAddress);
+        if (clientScoped.isPresent()) {
+            return QueryPlan.answering(clientScoped.orElseThrow());
+        }
         Optional<DnsAnswer> emulatorName = resolveEmulatorName(name, myIp, type);
         if (emulatorName.isPresent()) {
             return QueryPlan.answering(emulatorName.orElseThrow());
@@ -384,6 +399,24 @@ public class EmbeddedDnsServer {
      * today. A source that throws must not take the DNS server down with it: the query falls
      * through to the upstream resolvers, which is what happened before any source existed.
      */
+    private Optional<DnsAnswer> resolveForClient(String name, int type, String clientAddress) {
+        if (clientRecordSources == null || name == null || clientAddress == null) {
+            return Optional.empty();
+        }
+        for (DnsClientRecordSource source : clientRecordSources) {
+            try {
+                Optional<DnsAnswer> answer = source.resolve(name, type, clientAddress.trim());
+                if (answer != null && answer.isPresent()) {
+                    return answer;
+                }
+            } catch (Exception e) {
+                LOG.debugv("DNS client record source {0} failed to resolve {1}: {2}",
+                        source.getClass().getSimpleName(), name, e.getMessage());
+            }
+        }
+        return Optional.empty();
+    }
+
     private Optional<DnsAnswer> resolveFromRecordSources(String name, int type) {
         if (recordSources == null) {
             return Optional.empty();

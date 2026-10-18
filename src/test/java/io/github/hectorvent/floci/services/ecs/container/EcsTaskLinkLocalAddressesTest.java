@@ -33,6 +33,14 @@ class EcsTaskLinkLocalAddressesTest {
     }
 
     @Test
+    void neverHandsOutAnAddressInTheLatticeRange() {
+        for (int i = 0; i < 600; i++) {
+            String address = addresses.allocate(NETWORK, TASK);
+            assertTrue(!address.startsWith("169.254.171."), "handed out Lattice address " + address);
+        }
+    }
+
+    @Test
     void neverHandsOutTheAddressTheProxyHolds() {
         // Walk past where .2 sits so the skip is actually exercised rather than assumed.
         for (int i = 0; i < 20; i++) {

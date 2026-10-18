@@ -485,4 +485,41 @@ class FirehoseExtendedS3IntegrationTest {
                 .then().statusCode(200)
                 .extract().xmlPath().getString("ListBucketResult.Contents[0].Key");
     }
+
+    @Test
+    @Order(50)
+    void cloudWatchLoggingOptionsRoundTrip() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "CreateDeliveryStream")
+            .body("""
+                    {
+                      "DeliveryStreamName": "test-extended-s3-logging",
+                      "ExtendedS3DestinationConfiguration": {
+                        "RoleARN": "%s",
+                        "BucketARN": "%s",
+                        "CloudWatchLoggingOptions": {
+                          "Enabled": true, "LogGroupName": "/aws/kinesisfirehose/logging", "LogStreamName": "S3Delivery"
+                        }
+                      }
+                    }
+                    """.formatted(ROLE_ARN, BUCKET_ARN))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"test-extended-s3-logging\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription"
+                    + ".CloudWatchLoggingOptions.LogGroupName", equalTo("/aws/kinesisfirehose/logging"))
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription"
+                    + ".CloudWatchLoggingOptions.Enabled", equalTo(true));
+    }
 }

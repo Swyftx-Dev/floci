@@ -227,6 +227,8 @@ public class DeliveryStreamDescription {
         private DataFormatConversionConfiguration dataFormatConversionConfiguration;
         @JsonProperty("ProcessingConfiguration")
         private ProcessingConfiguration processingConfiguration;
+        @JsonProperty("CloudWatchLoggingOptions")
+        private Map<String, Object> cloudWatchLoggingOptions;
 
         public S3Destination() {}
         public String getRoleArn() { return roleArn; }
@@ -256,6 +258,12 @@ public class DeliveryStreamDescription {
             this.dataFormatConversionConfiguration = configuration;
         }
 
+        public Map<String, Object> getCloudWatchLoggingOptions() {
+            return cloudWatchLoggingOptions;
+        }
+        public void setCloudWatchLoggingOptions(Map<String, Object> cloudWatchLoggingOptions) {
+            this.cloudWatchLoggingOptions = cloudWatchLoggingOptions;
+        }
         public ProcessingConfiguration getProcessingConfiguration() {
             return processingConfiguration;
         }

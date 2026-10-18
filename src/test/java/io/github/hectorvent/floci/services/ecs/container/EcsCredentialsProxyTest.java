@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import io.github.hectorvent.floci.services.vpclattice.VpcLatticeLinkLocalDns;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -25,6 +26,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
@@ -241,7 +243,7 @@ class EcsCredentialsProxyTest {
      * container with the given id: the image check, the launch, the running check for a repeat
      * call, and the endpoint-reachability exec/callback plumbing.
      */
-    private void stubSuccessfulLaunch(String containerId) {
+    private ContainerBuilder.Builder stubSuccessfulLaunch(String containerId) {
         ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
         when(builder.build()).thenReturn(new ContainerSpec("floci/network-helper:local"));
         when(containerBuilder.newContainer(any())).thenReturn(builder);
@@ -263,6 +265,31 @@ class EcsCredentialsProxyTest {
         when(running.getRunning()).thenReturn(true);
 
         ContainerExecStubs.completeEveryExec(dockerClient, containerId, 0, "404", "");
+        return builder;
+    }
+
+    @Test
+    void holdsTheLatticeAddressBesideTheCredentialsOneAndRelaysItsPorts() {
+        VpcLatticeLinkLocalDns latticeDns = mock(VpcLatticeLinkLocalDns.class);
+        when(latticeDns.active()).thenReturn(true);
+        when(config.services().ecs().taskRoleCredentials().enabled()).thenReturn(true);
+        when(config.services().ecs().taskRoleCredentials().port()).thenReturn(4570);
+        EcsCredentialsProxy relaying = new EcsCredentialsProxy(dockerClient, containerBuilder, lifecycleManager,
+                dockerHostResolver, config, latticeDns);
+        ContainerBuilder.Builder builder = stubSuccessfulLaunch("proxy-1");
+        // One output answers both checks: an HTTP status for curl, the bound address for ip addr.
+        ContainerExecStubs.completeEveryExec(dockerClient, "proxy-1", 0, "404 inet 169.254.171.1/32", "");
+
+        relaying.ensureProxyOn("floci-net");
+
+        verify(builder).withLinkLocalIp("169.254.170.2");
+        verify(builder).withLinkLocalIp(VpcLatticeLinkLocalDns.ADDRESS);
+        verify(builder).withCmd(argThat((List<String> cmd) -> cmd.size() == 1
+                && cmd.getFirst().contains("TCP-LISTEN:80,bind=169.254.170.2")
+                && cmd.getFirst().contains("TCP:host.docker.internal:4570")
+                && cmd.getFirst().contains("TCP-LISTEN:80,bind=169.254.171.1")
+                && cmd.getFirst().contains("TCP-LISTEN:443,bind=169.254.171.1")
+                && cmd.getFirst().endsWith("wait")));
     }
 
     @Test

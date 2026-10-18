@@ -528,7 +528,7 @@ class EcsContainerManagerVolumesTest {
                 mock(ContainerLogStreamer.class), mock(ContainerDetector.class), cfg,
                 mock(RegionResolver.class), awsEnv, mock(SsmService.class),
                 mock(SecretsManagerService.class), mock(S3Service.class), ecrRegistryManager, new HostVolumePolicy(cfg),
-                null, null, null, null, null, efsService);
+                null, null, null, null, null, efsService, null);
     }
 
     private static TaskDefinition accessPointDefinition(String accessPointId) {

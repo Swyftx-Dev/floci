@@ -282,6 +282,20 @@ class EmbeddedDnsServerTest {
     }
 
     @Test
+    void planQuery_aClientScopedAnswerWinsOverEmulatorNamesAndRecordSources() {
+        DnsClientRecordSource linkLocal = (name, type, client) -> CLIENT.equals(client)
+                ? Optional.of(DnsAnswer.records(List.of("169.254.171.1"), 60)) : Optional.empty();
+        EmbeddedDnsServer dns = new EmbeddedDnsServer(List.of("localhost.floci.io"),
+                List.of(source("svc.localhost.floci.io", List.of("172.31.0.6"))), List.of(), List.of(),
+                List.of(linkLocal));
+
+        assertEquals(List.of("169.254.171.1"),
+                dns.planQuery("svc.localhost.floci.io", CLIENT, MY_IP, 1).answer().orElseThrow().addresses());
+        assertEquals(List.of(MY_IP),
+                dns.planQuery("svc.localhost.floci.io", "172.31.0.77", MY_IP, 1).answer().orElseThrow().addresses());
+    }
+
+    @Test
     void planQuery_forwardsToTheTargetsOfARuleAssociatedWithTheQueryingVpc() {
         EmbeddedDnsServer dns = withRules(List.of(),
                 rules("vpc-a", forward("corp.internal", "10.1.0.53")), clientVpc("vpc-a"));

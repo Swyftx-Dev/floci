@@ -11,11 +11,13 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.LocallyBuiltHelperImage;
+import io.github.hectorvent.floci.services.vpclattice.VpcLatticeLinkLocalDns;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -23,7 +25,9 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Owns the small proxy container, one per Docker network, that holds the ECS container-credentials
- * address (169.254.170.2) and forwards to {@link EcsTaskRoleCredentialsServer}. A task container
+ * address (169.254.170.2) and forwards to {@link EcsTaskRoleCredentialsServer}, and with the VPC
+ * Lattice data plane on, also holds {@link VpcLatticeLinkLocalDns#ADDRESS} and forwards its ports
+ * 80 and 443 to the Lattice listeners on Floci. A task container
  * needs its own address in 169.254.0.0/16 to reach this proxy at all, which
  * {@code EcsTaskLinkLocalAddresses} hands out: without a connected route for that range, the
  * kernel routes toward the default gateway instead of resolving the peer directly, and the
@@ -51,17 +55,30 @@ public class EcsCredentialsProxy implements ContainerTeardown {
     private final ContainerLifecycleManager lifecycleManager;
     private final DockerHostResolver dockerHostResolver;
     private final EmulatorConfig config;
+    private final VpcLatticeLinkLocalDns latticeDns;
     private final Map<String, String> proxyIdByNetwork = new ConcurrentHashMap<>();
+
+    EcsCredentialsProxy(DockerClient dockerClient, ContainerBuilder containerBuilder,
+                        ContainerLifecycleManager lifecycleManager, DockerHostResolver dockerHostResolver,
+                        EmulatorConfig config) {
+        this(dockerClient, containerBuilder, lifecycleManager, dockerHostResolver, config, null);
+    }
 
     @Inject
     public EcsCredentialsProxy(DockerClient dockerClient, ContainerBuilder containerBuilder,
                                ContainerLifecycleManager lifecycleManager, DockerHostResolver dockerHostResolver,
-                               EmulatorConfig config) {
+                               EmulatorConfig config, VpcLatticeLinkLocalDns latticeDns) {
         this.dockerClient = dockerClient;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.dockerHostResolver = dockerHostResolver;
         this.config = config;
+        this.latticeDns = latticeDns;
+    }
+
+    /** Whether the proxy also relays the Lattice link-local address. */
+    public boolean relaysLattice() {
+        return latticeDns != null && latticeDns.active();
     }
 
     /**
@@ -148,25 +165,45 @@ public class EcsCredentialsProxy implements ContainerTeardown {
         // either way, the same helper EC2's own IMDS proxy uses for this.
         String flociHost = dockerHostResolver.resolve();
         int port = config.services().ecs().taskRoleCredentials().port();
-        ContainerSpec spec = containerBuilder.newContainer(config.services().ecs().taskRoleCredentials().proxyImage())
+        boolean lattice = relaysLattice();
+        // Without Lattice the proxy exists for credentials alone; with it, credentials only when vended.
+        boolean credentials = !lattice || config.services().ecs().taskRoleCredentials().enabled();
+        StringBuilder relays = new StringBuilder();
+        List<String> held = new ArrayList<>();
+        ContainerBuilder.Builder builder = containerBuilder.newContainer(
+                        config.services().ecs().taskRoleCredentials().proxyImage())
                 .withName(name)
                 .withDockerNetwork(Optional.of(network))
-                .withLinkLocalIp(CREDENTIALS_ADDRESS)
-                .withHostDockerInternalOnLinux()
-                .withEntrypoint(List.of("socat"))
-                .withCmd(List.of(
-                        "TCP-LISTEN:80,bind=" + CREDENTIALS_ADDRESS + ",fork,reuseaddr",
-                        "TCP:" + flociHost + ":" + port))
+                .withHostDockerInternalOnLinux();
+        if (credentials) {
+            builder.withLinkLocalIp(CREDENTIALS_ADDRESS);
+            held.add(CREDENTIALS_ADDRESS);
+            relays.append(relay(CREDENTIALS_ADDRESS, 80, flociHost, port));
+        }
+        if (lattice) {
+            builder.withLinkLocalIp(VpcLatticeLinkLocalDns.ADDRESS);
+            held.add(VpcLatticeLinkLocalDns.ADDRESS);
+            relays.append(relay(VpcLatticeLinkLocalDns.ADDRESS, 80, flociHost, 80));
+            relays.append(relay(VpcLatticeLinkLocalDns.ADDRESS, 443, flociHost, 443));
+        }
+        ContainerSpec spec = builder
+                .withEntrypoint(List.of("/bin/sh", "-c"))
+                .withCmd(List.of(relays + "wait"))
                 .withLabels(Map.of(OWNS_NETWORK_LABEL, "true", ContainerStorageHelper.OWNER_LABEL, owner()))
                 .build();
 
         String proxyId = null;
         try {
             proxyId = lifecycleManager.createAndStart(spec).containerId();
-            requireEndpointReachable(proxyId);
+            if (credentials) {
+                requireEndpointReachable(proxyId);
+            }
+            if (lattice) {
+                requireAddressBound(proxyId, VpcLatticeLinkLocalDns.ADDRESS);
+            }
             proxyIdByNetwork.put(network, proxyId);
-            LOG.infov("ECS task-role credentials proxy {0} holding {1} on network {2}",
-                    proxyId, CREDENTIALS_ADDRESS, network);
+            LOG.infov("ECS link-local proxy {0} holding {1} on network {2}", proxyId,
+                    String.join(", ", held), network);
         } catch (RuntimeException e) {
             if (proxyId != null) {
                 lifecycleManager.removeIfExists(proxyId);
@@ -257,6 +294,29 @@ public class EcsCredentialsProxy implements ContainerTeardown {
         throw new IllegalStateException(
                 "The credentials proxy never answered on " + CREDENTIALS_ADDRESS + "; the Docker runtime may be "
                         + "ignoring LinkLocalIPs on this network, or the forward to Floci itself is not reachable");
+    }
+
+    private static String relay(String address, int listenPort, String targetHost, int targetPort) {
+        return "socat TCP-LISTEN:" + listenPort + ",bind=" + address + ",fork,reuseaddr TCP:" + targetHost + ":"
+                + targetPort + " & ";
+    }
+
+    /** Nothing may listen behind the Lattice address yet, so only the address itself is checked. */
+    private void requireAddressBound(String containerId, String address) {
+        for (int attempt = 0; attempt < VERIFY_ATTEMPTS; attempt++) {
+            String addresses = execCapture(containerId, "ip", "-4", "-o", "addr", "show");
+            if (addresses != null && addresses.contains(" " + address + "/")) {
+                return;
+            }
+            try {
+                Thread.sleep(VERIFY_INTERVAL_MILLIS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        throw new IllegalStateException("The link-local proxy never held " + address
+                + "; the Docker runtime may be ignoring LinkLocalIPs on this network");
     }
 
     private String execCapture(String containerId, String... cmd) {

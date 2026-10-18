@@ -105,6 +105,7 @@ public class EmbeddedDnsServer {
     private final Iterable<DnsRecordSource> recordSources;
     private final Iterable<DnsForwardingRuleSource> forwardingRuleSources;
     private final Iterable<DnsClientVpcSource> clientVpcSources;
+    private final Iterable<DnsClientRecordSource> clientRecordSources;
 
     EmbeddedDnsServer(List<String> suffixes) {
         this(suffixes, List.of());
@@ -133,18 +134,28 @@ public class EmbeddedDnsServer {
     EmbeddedDnsServer(List<String> suffixes, Iterable<DnsRecordSource> recordSources,
                       Iterable<DnsForwardingRuleSource> forwardingRuleSources,
                       Iterable<DnsClientVpcSource> clientVpcSources) {
+        this(suffixes, recordSources, forwardingRuleSources, clientVpcSources, List.of());
+    }
+
+    EmbeddedDnsServer(List<String> suffixes, Iterable<DnsRecordSource> recordSources,
+                      Iterable<DnsForwardingRuleSource> forwardingRuleSources,
+                      Iterable<DnsClientVpcSource> clientVpcSources,
+                      Iterable<DnsClientRecordSource> clientRecordSources) {
         this.suffixes.addAll(BUILTIN_SUFFIXES);
         this.suffixes.addAll(suffixes);
         this.recordSources = recordSources;
         this.forwardingRuleSources = forwardingRuleSources;
         this.clientVpcSources = clientVpcSources;
+        this.clientRecordSources = clientRecordSources;
     }
 
     @Inject
     public EmbeddedDnsServer(EmulatorConfig config, ContainerDetector containerDetector, Vertx vertx,
                              Instance<DnsRecordSource> recordSources,
                              Instance<DnsForwardingRuleSource> forwardingRuleSources,
-                             Instance<DnsClientVpcSource> clientVpcSources) {
+                             Instance<DnsClientVpcSource> clientVpcSources,
+                             Instance<DnsClientRecordSource> clientRecordSources) {
+        this.clientRecordSources = clientRecordSources;
         this.recordSources = recordSources;
         this.forwardingRuleSources = forwardingRuleSources;
         this.clientVpcSources = clientVpcSources;
@@ -294,17 +305,22 @@ public class EmbeddedDnsServer {
     }
 
     /**
-     * Stored public authority answers take precedence over broad emulator suffix spoofing.
-     * Other names the emulator itself owns come first, whatever the rules say. Route 53 Resolver does
-     * the same for the AWS-internal domains it autodefines system rules for, so that a rule for a
-     * broad domain (or for "." itself) cannot send the platform's own names off to a resolver that
-     * knows nothing about them.
+     * A client-scoped answer comes first: it exists only for the client that asked, so no rule or
+     * zone can be meant to override it. Stored public authority answers then take precedence over
+     * broad emulator suffix spoofing. Other names the emulator itself owns come first, whatever the
+     * rules say. Route 53 Resolver does the same for the AWS-internal domains it autodefines system
+     * rules for, so that a rule for a broad domain (or for "." itself) cannot send the platform's own
+     * names off to a resolver that knows nothing about them.
      *
      * <p>A forwarding rule associated with the querying VPC is then applied before Floci resolves
      * the name from a record source, because a Resolver rule takes precedence over a private
      * hosted zone that matches the same name.
      */
     QueryPlan planQuery(String name, String clientAddress, String myIp, int type) {
+        Optional<DnsAnswer> clientScoped = resolveForClient(name, type, clientAddress);
+        if (clientScoped.isPresent()) {
+            return QueryPlan.answering(clientScoped.orElseThrow());
+        }
         Optional<DnsAnswer> stored = resolveFromRecordSources(name, type, true);
         Optional<DnsAnswer> emulatorName = resolveEmulatorName(name, myIp, type);
         if (emulatorName.isPresent() && stored.isEmpty()) {
@@ -390,6 +406,28 @@ public class EmbeddedDnsServer {
 
     private static boolean isPresent(String value) {
         return value != null && !value.isBlank();
+    }
+
+    /**
+     * Answers that depend on who asks, such as the link-local address a VPC Lattice name resolves to
+     * inside an ECS task. A source that throws is skipped, as a record source is.
+     */
+    private Optional<DnsAnswer> resolveForClient(String name, int type, String clientAddress) {
+        if (clientRecordSources == null || name == null || clientAddress == null) {
+            return Optional.empty();
+        }
+        for (DnsClientRecordSource source : clientRecordSources) {
+            try {
+                Optional<DnsAnswer> answer = source.resolve(name, type, clientAddress.trim());
+                if (answer != null && answer.isPresent()) {
+                    return answer;
+                }
+            } catch (Exception e) {
+                LOG.debugv("DNS client record source {0} failed to resolve {1}: {2}",
+                        source.getClass().getSimpleName(), name, e.getMessage());
+            }
+        }
+        return Optional.empty();
     }
 
     /**

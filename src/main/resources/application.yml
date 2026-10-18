@@ -785,6 +785,9 @@ floci:
     elbv2:
       enabled: true
       mock: false
+    vpclattice:
+      enabled: true
+      mock: false
     codebuild:
       enabled: true
       # docker-network: floci-network

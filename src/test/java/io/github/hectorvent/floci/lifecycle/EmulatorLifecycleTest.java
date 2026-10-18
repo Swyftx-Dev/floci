@@ -82,6 +82,7 @@ class EmulatorLifecycleTest {
     @Mock private EmulatorConfig.EksServiceConfig eksServiceConfig;
     @Mock private EmulatorConfig.ElbV2ServiceConfig elbv2ServiceConfig;
     @Mock private EmulatorConfig.ElbServiceConfig elbServiceConfig;
+    @Mock private EmulatorConfig.VpcLatticeServiceConfig vpcLatticeServiceConfig;
     @Mock private IamService iamService;
     @Mock private EmulatorConfig.ElastiCacheServiceConfig elastiCacheServiceConfig;
     @Mock private ElastiCacheService elastiCacheService;
@@ -103,6 +104,7 @@ class EmulatorLifecycleTest {
     @Mock private EmulatorConfig.TimestreamInfluxDbServiceConfig timestreamInfluxDbServiceConfig;
     @Mock private io.github.hectorvent.floci.services.elbv2.ElbV2Service elbV2Service;
     @Mock private io.github.hectorvent.floci.services.elb.ElbClassicService elbClassicService;
+    @Mock private io.github.hectorvent.floci.services.vpclattice.VpcLatticeService vpcLatticeService;
     @Mock private EcsService ecsService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
     @Mock private SqsEventSourcePoller sqsPoller;
@@ -141,6 +143,8 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(elastiCacheServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.elb()).thenReturn(elbServiceConfig);
         Mockito.lenient().when(elbServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.vpclattice()).thenReturn(vpcLatticeServiceConfig);
+        Mockito.lenient().when(vpcLatticeServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.lambda()).thenReturn(lambdaServiceConfig);
         Mockito.lenient().when(lambdaServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.eks()).thenReturn(eksServiceConfig);
@@ -161,7 +165,7 @@ class EmulatorLifecycleTest {
                 memoryDbContainerManager, memoryDbProxyManager,
                 docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
                 rabbitMqManager, flinkContainerManager, rdsService, timestreamInfluxDbService,
-                elbV2Service, elbClassicService, ecsService,
+                elbV2Service, elbClassicService, vpcLatticeService, ecsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecsTaskRoleCredentialsServer, ecrRegistryManager, flociUiManager, initLifecycleState,
                 schemaCreationWorker, stepFunctionsService, durableExecutionService, containerTeardowns,

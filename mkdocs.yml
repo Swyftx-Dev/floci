@@ -183,6 +183,7 @@ nav:
     - Bedrock AgentCore: services/bedrock-agentcore.md
     - ELB v2: services/elb.md
     - ELB Classic (v1): services/elb-classic.md
+    - VPC Lattice: services/vpc-lattice.md
     - Auto Scaling: services/autoscaling.md
     - Application Auto Scaling: services/applicationautoscaling.md
     - Elastic Beanstalk: services/elastic-beanstalk.md

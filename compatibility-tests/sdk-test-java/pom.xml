@@ -558,6 +558,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>oam</artifactId>
         </dependency>
+        <!-- VPC Lattice client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>vpclattice</artifactId>
+        </dependency>
         <!-- BCM Pricing Calculator client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

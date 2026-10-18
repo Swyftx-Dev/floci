@@ -415,6 +415,10 @@ services:
     doc: docs/services/swf.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/swf/SwfJsonHandler.java, mode: switch }
+  - service: vpclattice
+    doc: docs/services/vpc-lattice.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/vpclattice/VpcLatticeController.java, mode: rest }
   - service: wafv2
     doc: docs/services/wafv2.md
     sources:

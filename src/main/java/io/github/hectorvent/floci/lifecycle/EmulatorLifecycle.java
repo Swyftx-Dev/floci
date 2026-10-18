@@ -41,6 +41,7 @@ import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.redshift.RedshiftDynamoDbZeroEtlConsumer;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import io.github.hectorvent.floci.services.timestreaminfluxdb.TimestreamInfluxDbService;
+import io.github.hectorvent.floci.services.vpclattice.VpcLatticeService;
 import io.quarkus.runtime.Quarkus;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.ShutdownEvent;
@@ -100,6 +101,7 @@ public class EmulatorLifecycle {
     private final ElbV2Service elbV2Service;
     private final EcsService ecsService;
     private final ElbClassicService elbClassicService;
+    private final VpcLatticeService vpcLatticeService;
     private final InitializationHooksRunner initializationHooksRunner;
     private final SqsEventSourcePoller sqsPoller;
     private final KinesisEventSourcePoller kinesisPoller;
@@ -140,6 +142,7 @@ public class EmulatorLifecycle {
                              TimestreamInfluxDbService timestreamInfluxDbService,
                              ElbV2Service elbV2Service,
                              ElbClassicService elbClassicService,
+                             VpcLatticeService vpcLatticeService,
                              EcsService ecsService,
                              InitializationHooksRunner initializationHooksRunner,
                              SqsEventSourcePoller sqsPoller,
@@ -180,6 +183,7 @@ public class EmulatorLifecycle {
         this.timestreamInfluxDbService = timestreamInfluxDbService;
         this.elbV2Service = elbV2Service;
         this.elbClassicService = elbClassicService;
+        this.vpcLatticeService = vpcLatticeService;
         this.ecsService = ecsService;
         this.initializationHooksRunner = initializationHooksRunner;
         this.sqsPoller = sqsPoller;
@@ -272,6 +276,9 @@ public class EmulatorLifecycle {
         }
         if (config.services().elb().enabled()) {
             elbClassicService.restorePersistedRuntime();
+        }
+        if (config.services().vpclattice().enabled()) {
+            vpcLatticeService.restorePersistedRuntime();
         }
         // After the load balancers: the reconciler registers the tasks it starts as their targets.
         if (config.services().ecs().enabled()) {

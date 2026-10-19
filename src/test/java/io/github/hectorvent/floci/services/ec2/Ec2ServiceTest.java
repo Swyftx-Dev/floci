@@ -847,6 +847,79 @@ class Ec2ServiceTest {
         assertFalse(tagStore.keys().contains(nodeId));
     }
 
+    @Test
+    void createTagsOnAnotherRegionsVpcIsNotFoundAndWritesNothing() {
+        Ec2Service service = tagTestService(new InMemoryStorageFactory());
+        String east = service.createVpc("us-east-1", "10.85.0.0/16", false).getVpcId();
+        String west = service.createVpc("eu-west-1", "10.86.0.0/16", false).getVpcId();
+
+        AwsException missing = assertThrows(AwsException.class, () -> service.createTags("eu-west-1",
+                List.of(west, east), List.of(new Tag("Team", "x"))));
+
+        assertEquals("InvalidVpcID.NotFound", missing.getErrorCode());
+        assertTrue(service.describeTags("eu-west-1", Map.of("key", List.of("Team"))).isEmpty());
+        assertTrue(service.describeTags("us-east-1", Map.of("key", List.of("Team"))).isEmpty());
+    }
+
+    @Test
+    void tagWritesRejectMissingAndMalformedIds() {
+        Ec2Service service = tagTestService(new InMemoryStorageFactory());
+        List<Tag> tag = List.of(new Tag("Team", "x"));
+
+        assertEquals("MissingParameter", assertThrows(AwsException.class,
+                () -> service.createTags("us-east-1", List.of(), tag)).getErrorCode());
+        assertEquals("MissingParameter", assertThrows(AwsException.class,
+                () -> service.deleteTags("us-east-1", List.of(), tag)).getErrorCode());
+        for (String id : List.of("not-an-id", "vpc-xyz", "i-123", "foo-0123456789abcdef0")) {
+            assertEquals("InvalidID", assertThrows(AwsException.class,
+                    () -> service.createTags("us-east-1", List.of(id), tag)).getErrorCode(), id);
+            assertEquals("InvalidID", assertThrows(AwsException.class,
+                    () -> service.deleteTags("us-east-1", List.of(id), tag)).getErrorCode(), id);
+        }
+    }
+
+    @Test
+    void aWellFormedIdOfAnUnmodelledTypeIsTagged() {
+        Ec2Service service = tagTestService(new InMemoryStorageFactory());
+
+        service.createTags("us-east-1", List.of("vgw-0123456789abcdef0"), List.of(new Tag("Team", "x")));
+
+        assertEquals("x", service.resourceTags("us-east-1", "vgw-0123456789abcdef0").getFirst().getValue());
+    }
+
+    @Test
+    void aResourceTakesFiftyUserTagsAndAwsTagsDoNotCount() {
+        Ec2Service service = tagTestService(new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.87.0.0/16", false).getVpcId();
+        service.createSystemTags("us-east-1", List.of(vpcId), List.of(new Tag("aws:cloudformation:stack-name", "s")));
+        List<Tag> fifty = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            fifty.add(new Tag("k" + i, "v"));
+        }
+
+        service.createTags("us-east-1", List.of(vpcId), fifty);
+        service.createTags("us-east-1", List.of(vpcId), List.of(new Tag("k0", "overwritten")));
+        AwsException limit = assertThrows(AwsException.class,
+                () -> service.createTags("us-east-1", List.of(vpcId), List.of(new Tag("k50", "v"))));
+
+        assertEquals("TagLimitExceeded", limit.getErrorCode());
+        assertEquals(51, service.resourceTags("us-east-1", vpcId).size());
+    }
+
+    @Test
+    void tagKeysAndValuesAreLimitedTo128And256Characters() {
+        Ec2Service service = tagTestService(new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.88.0.0/16", false).getVpcId();
+
+        service.createTags("us-east-1", List.of(vpcId), List.of(new Tag("k".repeat(128), "v".repeat(256))));
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class, () -> service.createTags("us-east-1",
+                List.of(vpcId), List.of(new Tag("k".repeat(129), "v")))).getErrorCode());
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class, () -> service.createTags("us-east-1",
+                List.of(vpcId), List.of(new Tag("k", "v".repeat(257))))).getErrorCode());
+        // Unicode characters, not UTF-16 units: 128 emoji are a valid key.
+        service.createTags("us-east-1", List.of(vpcId), List.of(new Tag("\uD83D\uDE00".repeat(128), "v")));
+    }
+
     private static Ec2Service tagTestService(StorageFactory storageFactory) {
         return new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), storageFactory);
@@ -2592,13 +2665,13 @@ class Ec2ServiceTest {
                 new InMemoryStorageFactory(Map.of("ec2-registered-images.json", imageStorage)));
 
         Image stored = new Image();
-        stored.setImageId("ami-detached-tags");
+        stored.setImageId("ami-0de7ac4ed7a95");
         stored.setName("detached-tags");
         stored.setOwnerId("000000000000");
         stored.setPublic(false);
         stored.setImageOwnerAlias(null);
         stored.setRegion("us-east-1");
-        imageStorage.put("us-east-1::ami-detached-tags", stored);
+        imageStorage.put("us-east-1::ami-0de7ac4ed7a95", stored);
         int putsBeforeDescribe = imageStorage.putCount();
 
         Tag tag = new Tag();
@@ -6522,7 +6595,7 @@ class Ec2ServiceTest {
         }
 
         private Image storedImage() {
-            return copy(values.get("us-east-1::ami-detached-tags"));
+            return copy(values.get("us-east-1::ami-0de7ac4ed7a95"));
         }
 
         private static Image copy(Image source) {
@@ -6557,7 +6630,7 @@ class Ec2ServiceTest {
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
                 new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
         Instance nodeInstance = new Instance();
-        nodeInstance.setInstanceId("i-node1234567890abc");
+        nodeInstance.setInstanceId("i-0de1234567890abc");
         nodeInstance.setRegion("us-east-1");
         nodeInstance.setPlacement(new Placement("us-east-1a"));
         nodeInstance.setState(InstanceState.running());
@@ -6567,7 +6640,7 @@ class Ec2ServiceTest {
         service.setClusterNodeInstanceProvider(new ClusterNodeInstanceProvider() {
             @Override
             public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
-                return "i-node1234567890abc".equals(instanceId) && ("us-east-1".equals(region) || region == null)
+                return "i-0de1234567890abc".equals(instanceId) && ("us-east-1".equals(region) || region == null)
                         ? Optional.of(nodeInstance) : Optional.empty();
             }
 
@@ -6593,7 +6666,7 @@ class Ec2ServiceTest {
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
                 new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
         Instance nodeInstance = new Instance();
-        nodeInstance.setInstanceId("i-node1234567890abc");
+        nodeInstance.setInstanceId("i-0de1234567890abc");
         nodeInstance.setRegion("us-east-1");
         nodeInstance.setPlacement(new Placement("us-east-1a"));
         nodeInstance.setState(InstanceState.running());
@@ -6603,7 +6676,7 @@ class Ec2ServiceTest {
         service.setClusterNodeInstanceProvider(new ClusterNodeInstanceProvider() {
             @Override
             public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
-                return "i-node1234567890abc".equals(instanceId) && ("us-east-1".equals(region) || region == null)
+                return "i-0de1234567890abc".equals(instanceId) && ("us-east-1".equals(region) || region == null)
                         ? Optional.of(nodeInstance) : Optional.empty();
             }
 
@@ -6616,11 +6689,11 @@ class Ec2ServiceTest {
         List<Reservation> reservations = service.describeInstances("us-east-1", List.of(), Map.of());
         assertEquals(1, reservations.size());
         Instance inst = reservations.getFirst().getInstances().getFirst();
-        assertEquals("i-node1234567890abc", inst.getInstanceId());
+        assertEquals("i-0de1234567890abc", inst.getInstanceId());
         assertEquals("m5.large", inst.getInstanceType());
         assertEquals("us-east-1a", inst.getPlacement().getAvailabilityZone());
 
-        List<Reservation> byId = service.describeInstances("us-east-1", List.of("i-node1234567890abc"), Map.of());
+        List<Reservation> byId = service.describeInstances("us-east-1", List.of("i-0de1234567890abc"), Map.of());
         assertEquals(1, byId.size());
 
         List<Reservation> filtered = service.describeInstances("us-east-1", List.of(), Map.of("instance-type", List.of("m5.large")));
@@ -6631,11 +6704,11 @@ class Ec2ServiceTest {
 
         List<Instance> statuses = service.describeInstanceStatus("us-east-1", List.of());
         assertEquals(1, statuses.size());
-        assertEquals("i-node1234567890abc", statuses.getFirst().getInstanceId());
+        assertEquals("i-0de1234567890abc", statuses.getFirst().getInstanceId());
 
-        Instance foundById = service.findInstanceById("i-node1234567890abc");
+        Instance foundById = service.findInstanceById("i-0de1234567890abc");
         assertNotNull(foundById);
-        assertEquals("i-node1234567890abc", foundById.getInstanceId());
+        assertEquals("i-0de1234567890abc", foundById.getInstanceId());
     }
 
     @Test
@@ -6644,7 +6717,7 @@ class Ec2ServiceTest {
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
                 new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
         Instance nodeInstance = new Instance();
-        nodeInstance.setInstanceId("i-node1234567890abc");
+        nodeInstance.setInstanceId("i-0de1234567890abc");
         nodeInstance.setRegion("us-east-1");
         nodeInstance.setPlacement(new Placement("us-east-1a"));
         nodeInstance.setState(InstanceState.running());
@@ -6653,7 +6726,7 @@ class Ec2ServiceTest {
         service.setClusterNodeInstanceProvider(new ClusterNodeInstanceProvider() {
             @Override
             public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
-                return "i-node1234567890abc".equals(instanceId) && ("us-east-1".equals(region) || region == null)
+                return "i-0de1234567890abc".equals(instanceId) && ("us-east-1".equals(region) || region == null)
                         ? Optional.of(nodeInstance) : Optional.empty();
             }
 
@@ -6664,22 +6737,22 @@ class Ec2ServiceTest {
         });
 
         AwsException terminateEx = assertThrows(AwsException.class, () ->
-                service.terminateInstances("us-east-1", List.of("i-node1234567890abc")));
+                service.terminateInstances("us-east-1", List.of("i-0de1234567890abc")));
         assertEquals("OperationNotPermitted", terminateEx.getErrorCode());
         assertEquals(400, terminateEx.getHttpStatus());
 
         AwsException stopEx = assertThrows(AwsException.class, () ->
-                service.stopInstances("us-east-1", List.of("i-node1234567890abc")));
+                service.stopInstances("us-east-1", List.of("i-0de1234567890abc")));
         assertEquals("OperationNotPermitted", stopEx.getErrorCode());
         assertEquals(400, stopEx.getHttpStatus());
 
         AwsException startEx = assertThrows(AwsException.class, () ->
-                service.startInstances("us-east-1", List.of("i-node1234567890abc")));
+                service.startInstances("us-east-1", List.of("i-0de1234567890abc")));
         assertEquals("OperationNotPermitted", startEx.getErrorCode());
         assertEquals(400, startEx.getHttpStatus());
 
         AwsException rebootEx = assertThrows(AwsException.class, () ->
-                service.rebootInstances("us-east-1", List.of("i-node1234567890abc")));
+                service.rebootInstances("us-east-1", List.of("i-0de1234567890abc")));
         assertEquals("OperationNotPermitted", rebootEx.getErrorCode());
         assertEquals(400, rebootEx.getHttpStatus());
     }
@@ -6690,7 +6763,7 @@ class Ec2ServiceTest {
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
                 new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
         Instance nodeInstance = new Instance();
-        nodeInstance.setInstanceId("i-node1234567890abc");
+        nodeInstance.setInstanceId("i-0de1234567890abc");
         nodeInstance.setRegion("us-east-1");
         nodeInstance.setPlacement(new Placement("us-east-1a"));
         nodeInstance.setState(InstanceState.running());
@@ -6698,7 +6771,7 @@ class Ec2ServiceTest {
         service.setClusterNodeInstanceProvider(new ClusterNodeInstanceProvider() {
             @Override
             public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
-                return "i-node1234567890abc".equals(instanceId) ? Optional.of(nodeInstance) : Optional.empty();
+                return "i-0de1234567890abc".equals(instanceId) ? Optional.of(nodeInstance) : Optional.empty();
             }
 
             @Override
@@ -6727,7 +6800,7 @@ class Ec2ServiceTest {
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
                 new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
         Instance nodeInstance = new Instance();
-        nodeInstance.setInstanceId("i-node1234567890abc");
+        nodeInstance.setInstanceId("i-0de1234567890abc");
         nodeInstance.setRegion("us-east-1");
         nodeInstance.setPlacement(new Placement("us-east-1a"));
         nodeInstance.setState(InstanceState.running());
@@ -6735,7 +6808,7 @@ class Ec2ServiceTest {
         service.setClusterNodeInstanceProvider(new ClusterNodeInstanceProvider() {
             @Override
             public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
-                return "i-node1234567890abc".equals(instanceId) ? Optional.of(nodeInstance) : Optional.empty();
+                return "i-0de1234567890abc".equals(instanceId) ? Optional.of(nodeInstance) : Optional.empty();
             }
 
             @Override
@@ -6750,7 +6823,7 @@ class Ec2ServiceTest {
 
         assertTrue(service.describeInstances("us-east-1", List.of(), Map.of()).isEmpty());
         AwsException error = assertThrows(AwsException.class, () ->
-                service.describeInstances("us-east-1", List.of("i-node1234567890abc"), Map.of()));
+                service.describeInstances("us-east-1", List.of("i-0de1234567890abc"), Map.of()));
         assertEquals("InvalidInstanceID.NotFound", error.getErrorCode());
     }
 
@@ -6760,7 +6833,7 @@ class Ec2ServiceTest {
         String accountB = "444455556666";
 
         Instance nodeInstance = new Instance();
-        nodeInstance.setInstanceId("i-node1234567890abc");
+        nodeInstance.setInstanceId("i-0de1234567890abc");
         nodeInstance.setRegion("us-east-1");
         nodeInstance.setPlacement(new Placement("us-east-1a"));
         nodeInstance.setState(InstanceState.running());
@@ -6769,7 +6842,7 @@ class Ec2ServiceTest {
         ClusterNodeInstanceProvider provider = new ClusterNodeInstanceProvider() {
             @Override
             public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
-                if (accountA.equals(accountId) && "i-node1234567890abc".equals(instanceId)) {
+                if (accountA.equals(accountId) && "i-0de1234567890abc".equals(instanceId)) {
                     return Optional.of(nodeInstance);
                 }
                 return Optional.empty();
@@ -6800,7 +6873,7 @@ class Ec2ServiceTest {
         reqCtx.setAccountId(accountA);
         List<Reservation> resA = service.describeInstances("us-east-1", List.of(), Map.of());
         assertEquals(1, resA.size());
-        assertEquals("i-node1234567890abc", resA.getFirst().getInstances().getFirst().getInstanceId());
+        assertEquals("i-0de1234567890abc", resA.getFirst().getInstances().getFirst().getInstanceId());
 
         // Under account B, instance is not visible
         reqCtx.setAccountId(accountB);
@@ -6808,27 +6881,27 @@ class Ec2ServiceTest {
         assertTrue(resB.isEmpty());
 
         AwsException notFoundB = assertThrows(AwsException.class, () ->
-                service.describeInstances("us-east-1", List.of("i-node1234567890abc"), Map.of()));
+                service.describeInstances("us-east-1", List.of("i-0de1234567890abc"), Map.of()));
         assertEquals("InvalidInstanceID.NotFound", notFoundB.getErrorCode());
 
         // findInstanceForAccount respects account argument
-        assertTrue(service.findInstanceForAccount(accountA, "us-east-1", "i-node1234567890abc").isPresent());
-        assertTrue(service.findInstanceForAccount(accountB, "us-east-1", "i-node1234567890abc").isEmpty());
+        assertTrue(service.findInstanceForAccount(accountA, "us-east-1", "i-0de1234567890abc").isPresent());
+        assertTrue(service.findInstanceForAccount(accountB, "us-east-1", "i-0de1234567890abc").isEmpty());
 
         // findInstanceById respects callerAccountId and explicit account argument
-        assertNull(service.findInstanceById("i-node1234567890abc"));
-        assertNull(service.findInstanceById(accountB, "i-node1234567890abc"));
-        assertNotNull(service.findInstanceById(accountA, "i-node1234567890abc"));
+        assertNull(service.findInstanceById("i-0de1234567890abc"));
+        assertNull(service.findInstanceById(accountB, "i-0de1234567890abc"));
+        assertNotNull(service.findInstanceById(accountA, "i-0de1234567890abc"));
 
         reqCtx.setAccountId(accountA);
-        assertNotNull(service.findInstanceById("i-node1234567890abc"));
+        assertNotNull(service.findInstanceById("i-0de1234567890abc"));
     }
 
     @Test
     void clusterNodeInstanceTaggingIsolatedAndDoesNotMutateProvider() {
         String accountA = "111122223333";
         Instance nodeInstance = new Instance();
-        nodeInstance.setInstanceId("i-node1234567890abc");
+        nodeInstance.setInstanceId("i-0de1234567890abc");
         nodeInstance.setRegion("us-east-1");
         nodeInstance.setPlacement(new Placement("us-east-1a"));
         nodeInstance.setState(InstanceState.running());
@@ -6839,7 +6912,7 @@ class Ec2ServiceTest {
         ClusterNodeInstanceProvider provider = new ClusterNodeInstanceProvider() {
             @Override
             public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
-                if (accountA.equals(accountId) && "i-node1234567890abc".equals(instanceId)) {
+                if (accountA.equals(accountId) && "i-0de1234567890abc".equals(instanceId)) {
                     return Optional.of(nodeInstance);
                 }
                 return Optional.empty();
@@ -6868,31 +6941,31 @@ class Ec2ServiceTest {
         service.setClusterNodeInstanceProvider(provider);
 
         // Before any custom tags are added, describeTags includes default tags
-        List<Map<String, String>> initialTags = service.describeTags("us-east-1", Map.of("resource-id", List.of("i-node1234567890abc")));
+        List<Map<String, String>> initialTags = service.describeTags("us-east-1", Map.of("resource-id", List.of("i-0de1234567890abc")));
         assertEquals(1, initialTags.size());
         assertEquals("Name", initialTags.getFirst().get("key"));
         assertEquals("test-cluster-node", initialTags.getFirst().get("value"));
 
         // Create tags on the node instance
-        service.createTags("us-east-1", List.of("i-node1234567890abc"), List.of(new Tag("Environment", "production")));
+        service.createTags("us-east-1", List.of("i-0de1234567890abc"), List.of(new Tag("Environment", "production")));
 
         // Provider's underlying object must NOT be mutated
         assertEquals(1, nodeInstance.getTags().size());
         assertEquals("Name", nodeInstance.getTags().getFirst().getKey());
 
         // EC2 service returns defensive copy with new tag merged
-        List<Reservation> reservations = service.describeInstances("us-east-1", List.of("i-node1234567890abc"), Map.of());
+        List<Reservation> reservations = service.describeInstances("us-east-1", List.of("i-0de1234567890abc"), Map.of());
         Instance queried = reservations.getFirst().getInstances().getFirst();
         assertTrue(queried.getTags().stream().anyMatch(t -> "Environment".equals(t.getKey()) && "production".equals(t.getValue())));
         assertTrue(queried.getTags().stream().anyMatch(t -> "Name".equals(t.getKey()) && "test-cluster-node".equals(t.getValue())));
 
         // DescribeTags now returns both tags
-        List<Map<String, String>> updatedTags = service.describeTags("us-east-1", Map.of("resource-id", List.of("i-node1234567890abc")));
+        List<Map<String, String>> updatedTags = service.describeTags("us-east-1", Map.of("resource-id", List.of("i-0de1234567890abc")));
         assertEquals(2, updatedTags.size());
 
         // Delete tag
-        service.deleteTags("us-east-1", List.of("i-node1234567890abc"), List.of(new Tag("Environment", "production")));
-        List<Map<String, String>> finalTags = service.describeTags("us-east-1", Map.of("resource-id", List.of("i-node1234567890abc")));
+        service.deleteTags("us-east-1", List.of("i-0de1234567890abc"), List.of(new Tag("Environment", "production")));
+        List<Map<String, String>> finalTags = service.describeTags("us-east-1", Map.of("resource-id", List.of("i-0de1234567890abc")));
         assertEquals(1, finalTags.size());
         assertEquals("Name", finalTags.getFirst().get("key"));
 

@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.ecs;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
-import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.EcsTaskAddress;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
@@ -11,6 +10,8 @@ import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import io.github.hectorvent.floci.services.elbv2.model.TargetHealth;
+import io.github.hectorvent.floci.services.vpclattice.VpcLatticeService;
+import io.github.hectorvent.floci.services.vpclattice.model.TargetGroupConfig;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import jakarta.inject.Inject;
@@ -47,6 +48,9 @@ class EcsLoadBalancerRegistrarTest {
     @InjectSpy
     EcsContainerManager containerManager;
 
+    @Inject
+    VpcLatticeService vpcLatticeService;
+
     private String createTargetGroup(String name) {
         TargetGroup tg = elbV2Service.createTargetGroup(REGION, name, "HTTP", "HTTP1",
                 8080, "vpc-regtest", "ip",
@@ -66,22 +70,19 @@ class EcsLoadBalancerRegistrarTest {
         return task;
     }
 
-    private EcsServiceModel serviceWithLb(String tgArn, String containerName, int containerPort) {
+    private List<EcsLoadBalancer> serviceWithLb(String tgArn, String containerName, int containerPort) {
         EcsLoadBalancer lb = new EcsLoadBalancer();
         lb.setTargetGroupArn(tgArn);
         lb.setContainerName(containerName);
         lb.setContainerPort(containerPort);
-        EcsServiceModel svc = new EcsServiceModel();
-        svc.setServiceName("regtest-svc");
-        svc.setLoadBalancers(List.of(lb));
-        return svc;
+        return List.of(lb);
     }
 
     @Test
     void registerThenDeregisterTaskContainer() {
         String tgArn = createTargetGroup("reg-tg-1");
         EcsTask task = taskWithContainer("web", 8080, 34567);
-        EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
+        List<EcsLoadBalancer> svc = serviceWithLb(tgArn, "web", 8080);
 
         registrar.registerTask(task, svc, REGION);
 
@@ -104,7 +105,7 @@ class EcsLoadBalancerRegistrarTest {
         // shape of native mode is covered by registerThenDeregisterTaskContainer.
         String tgArn = createTargetGroup("reg-tg-awsvpc");
         EcsTask task = taskWithContainer("web", 80, 80);
-        EcsServiceModel svc = serviceWithLb(tgArn, "web", 80);
+        List<EcsLoadBalancer> svc = serviceWithLb(tgArn, "web", 80);
 
         registrar.registerTask(task, svc, REGION);
 
@@ -119,7 +120,7 @@ class EcsLoadBalancerRegistrarTest {
     void publishedAwsvpcBindingRegistersTheContainerPortAtTheDockerNetworkAddress() {
         String tgArn = createTargetGroup("reg-tg-published-awsvpc");
         EcsTask task = taskWithContainer("web", 80, 32781);
-        EcsServiceModel svc = serviceWithLb(tgArn, "web", 80);
+        List<EcsLoadBalancer> svc = serviceWithLb(tgArn, "web", 80);
         doReturn("172.18.0.7").when(containerManager).resolveContainerHost(task.getContainers().getFirst());
 
         registrar.registerTask(task, svc, REGION);
@@ -134,13 +135,31 @@ class EcsLoadBalancerRegistrarTest {
     }
 
     @Test
+    void registersIntoAVpcLatticeTargetGroupPickedByItsArn() {
+        TargetGroupConfig config = new TargetGroupConfig();
+        config.setPort(8080);
+        config.setProtocol("HTTP");
+        config.setVpcIdentifier("vpc-regtest");
+        String tgArn = vpcLatticeService.createTargetGroup("reg-lattice-tg", "IP", config, Map.of(), REGION).getArn();
+        EcsTask task = taskWithContainer("web", 8080, 41000);
+        List<EcsLoadBalancer> bindings = serviceWithLb(tgArn, "web", 8080);
+
+        registrar.registerTask(task, bindings, REGION);
+        List<VpcLatticeService.TargetSummary> registered = vpcLatticeService.listTargets(tgArn, null, REGION);
+        assertEquals(1, registered.size());
+        assertEquals("127.0.0.1", registered.getFirst().id());
+        assertEquals(41000, registered.getFirst().port());
+
+        registrar.deregisterTask(task, bindings, REGION);
+        assertTrue(vpcLatticeService.listTargets(tgArn, null, REGION).isEmpty(),
+                "the Lattice target should be deregistered when the task stops");
+    }
+
+    @Test
     void serviceWithoutLoadBalancersRegistersNothing() {
         String tgArn = createTargetGroup("reg-tg-2");
         EcsTask task = taskWithContainer("web", 8080, 40000);
-        EcsServiceModel svc = new EcsServiceModel();   // no loadBalancers
-        svc.setServiceName("regtest-svc");
-
-        registrar.registerTask(task, svc, REGION);
+        registrar.registerTask(task, List.of(), REGION);
         assertTrue(elbV2Service.describeTargetHealth(REGION, tgArn, null).isEmpty(),
                 "no loadBalancers block -> no target registered");
     }
@@ -150,7 +169,7 @@ class EcsLoadBalancerRegistrarTest {
         String tgArn = createTargetGroup("reg-tg-3");
         // task container exposes 8080, but the loadBalancers block points at 9999
         EcsTask task = taskWithContainer("web", 8080, 41000);
-        EcsServiceModel svc = serviceWithLb(tgArn, "web", 9999);
+        List<EcsLoadBalancer> svc = serviceWithLb(tgArn, "web", 9999);
 
         registrar.registerTask(task, svc, REGION);
         assertTrue(elbV2Service.describeTargetHealth(REGION, tgArn, null).isEmpty(),
@@ -174,7 +193,7 @@ class EcsLoadBalancerRegistrarTest {
     void deregisterTaskRemovesTheTargetItRecordedEvenAfterTheBindingChanged() {
         String tgArn = createTargetGroup("reg-tg-recorded");
         EcsTask task = taskWithContainer("web", 8080, 35000);
-        EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
+        List<EcsLoadBalancer> svc = serviceWithLb(tgArn, "web", 8080);
         registrar.registerTask(task, svc, REGION);
         task.getContainers().getFirst().setNetworkBindings(List.of(
                 new NetworkBinding("0.0.0.0", 8080, 36000, "tcp")));
@@ -217,7 +236,7 @@ class EcsLoadBalancerRegistrarTest {
         String tgArn = createTargetGroup("reg-tg-preexisting");
         elbV2Service.registerTargets(REGION, tgArn, List.of(target("127.0.0.1", 39000)));
         EcsTask task = taskWithContainer("web", 8080, 39000);
-        EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
+        List<EcsLoadBalancer> svc = serviceWithLb(tgArn, "web", 8080);
 
         registrar.registerTask(task, svc, REGION);
         assertEquals(1, elbV2Service.describeTargetHealth(REGION, tgArn, null).size());

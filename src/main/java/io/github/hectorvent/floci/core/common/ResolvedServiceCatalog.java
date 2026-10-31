@@ -99,6 +99,7 @@ import io.github.hectorvent.floci.services.signin.SigninController;
 import io.github.hectorvent.floci.services.ssooidc.SsoOidcController;
 import io.github.hectorvent.floci.services.ssoportal.SsoPortalController;
 import io.github.hectorvent.floci.services.swf.model.SwfConstants;
+import io.github.hectorvent.floci.services.vpclattice.VpcLatticeController;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -457,6 +458,10 @@ public class ResolvedServiceCatalog {
                         "elbv2", config.storage().mode(), 5000L, AwsNamespaces.ELB_V2, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("elasticloadbalancing"), Set.of(), Set.of()),
+                descriptor("vpc-lattice", "vpclattice", config.services().vpclattice().enabled(), true,
+                        "vpclattice", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("vpc-lattice"), Set.of(), Set.of(VpcLatticeController.class)),
                 // Classic (v1) ELB shares the elasticloadbalancing endpoint and credential scope
                 // with ELBv2 above, so it claims neither here; AwsQueryController splits the two on
                 // the request's Version parameter. Listed so the service and its config knob are

@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsProxyServer;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver.CertificateMaterial;
+import io.github.hectorvent.floci.core.common.port.SharedHttpPorts;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
@@ -19,6 +20,7 @@ import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
 import io.vertx.core.net.SSLOptions;
+import io.vertx.core.net.SocketAddress;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -535,6 +537,7 @@ class ElbV2ListenerOwnershipTest {
 
         private Fixture(Registry registry) {
             plane = new ElbV2DataPlane(registry);
+            plane.sharedHttpPorts = sharedHttpPorts();
             plane.config = mock(EmulatorConfig.class);
             EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
             EmulatorConfig.ElbV2ServiceConfig config = mock(EmulatorConfig.ElbV2ServiceConfig.class);
@@ -563,7 +566,7 @@ class ElbV2ListenerOwnershipTest {
                     handlers.put(port, handler.getArgument(0));
                     return server;
                 });
-                when(server.listen()).thenAnswer(ignored -> {
+                when(server.listen(any(SocketAddress.class))).thenAnswer(ignored -> {
                     if (failNextListenPort == port) {
                         failNextListenPort = -1;
                         return Future.failedFuture(new BindException("controlled occupied port"));
@@ -599,6 +602,14 @@ class ElbV2ListenerOwnershipTest {
             verify(response).setStatusCode(200);
             verify(response).end(body);
         }
+    }
+
+    /** A shared socket that binds at once and frees the port at once. */
+    private static SharedHttpPorts sharedHttpPorts() {
+        SharedHttpPorts ports = mock(SharedHttpPorts.class);
+        when(ports.attachBackend(anyInt(), any(), anyInt())).thenReturn(Future.succeededFuture());
+        when(ports.detachBackend(anyInt(), any())).thenReturn(Future.succeededFuture());
+        return ports;
     }
 
     private static Listener listener(String name, int port, boolean secure) {

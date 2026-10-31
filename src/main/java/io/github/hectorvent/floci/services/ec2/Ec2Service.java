@@ -1851,6 +1851,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     ids.add(list.getPrefixListId());
                     names.add(list.getPrefixListName());
                 }
+                ids.add(latticePrefixList(region.getKey()).getPrefixListId());
+                names.add(latticePrefixList(region.getKey()).getPrefixListName());
                 for (PrefixList list : region.getValue()) {
                     if (list == null || list.getPrefixListId() == null
                             || !list.getPrefixListId().matches("pl-(?:[0-9a-f]{8}|[0-9a-f]{17})")
@@ -1885,6 +1887,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         List.of("52.216.0.0/15", "54.231.0.0/16")),
                 awsManagedPrefixList(region, "pl-02cd2c6b", "com.amazonaws." + region + ".dynamodb",
                         List.of("3.218.182.0/24", "52.94.0.0/22")));
+    }
+
+    /**
+     * The AWS-managed list of VPC Lattice's link-local range. It is not a gateway endpoint list, so
+     * DescribePrefixLists leaves it out, as on AWS, while security group rules can still reference it.
+     */
+    private ManagedPrefixList latticePrefixList(String region) {
+        return awsManagedPrefixList(region, "pl-0a1b2c3d4e5f60718", "com.amazonaws." + region + ".vpc-lattice",
+                List.of("169.254.171.0/24"));
     }
 
     private ManagedPrefixList awsManagedPrefixList(String region, String id, String name, List<String> cidrs) {
@@ -1959,6 +1970,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     List<ManagedPrefixList> describeManagedPrefixLists(String region, List<String> prefixListIds,
                                                        List<Map.Entry<String, List<String>>> filters) {
         List<ManagedPrefixList> all = new ArrayList<>(awsManagedPrefixLists(region));
+        all.add(latticePrefixList(region));
         managedPrefixLists.scan(k -> true).stream()
                 .filter(list -> region.equals(list.getRegion()))
                 .forEach(all::add);
@@ -4358,7 +4370,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private Map<String, List<String>> policyPrefixLists(String region, List<SecurityGroup> groups) {
-        Map<String, ManagedPrefixList> awsLists = awsManagedPrefixLists(region).stream()
+        Map<String, ManagedPrefixList> awsLists = Stream.concat(awsManagedPrefixLists(region).stream(),
+                        Stream.of(latticePrefixList(region)))
                 .collect(Collectors.toMap(ManagedPrefixList::getPrefixListId, Function.identity()));
         Map<String, List<String>> resolved = new LinkedHashMap<>();
         for (SecurityGroup group : groups) {

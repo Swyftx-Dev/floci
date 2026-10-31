@@ -136,10 +136,17 @@ public class RamService {
     public ResourceShare createResourceShare(String name, List<String> principals,
                                              List<String> resourceArns, boolean allowExternalPrincipals,
                                              String region, String owningAccountId) {
+        return createResourceShare(name, principals, resourceArns, allowExternalPrincipals, Map.of(), region,
+                owningAccountId);
+    }
+
+    public ResourceShare createResourceShare(String name, List<String> principals,
+                                             List<String> resourceArns, boolean allowExternalPrincipals,
+                                             Map<String, String> tags, String region, String owningAccountId) {
         String arn = AwsArnUtils.Arn.of("ram", region, owningAccountId, "resource-share/" + UUID.randomUUID()).toString();
         ResourceShare share = new ResourceShare(
                 arn, name, owningAccountId, principals, resourceArns, allowExternalPrincipals);
-        ResourceShare stored = putForOwner(share);
+        ResourceShare stored = putForOwner(tags.isEmpty() ? share : share.withTags(new LinkedHashMap<>(tags)));
         inviteAccountPrincipals(stored, principals);
         return stored;
     }

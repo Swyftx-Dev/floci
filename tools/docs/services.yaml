@@ -426,6 +426,10 @@ services:
     doc: docs/services/swf.md
     sources:
       - { path: services/swf/SwfJsonHandler.java, mode: switch }
+  - service: vpclattice
+    doc: docs/services/vpc-lattice.md
+    sources:
+      - { path: services/vpclattice/VpcLatticeController.java, mode: rest }
   - service: wafv2
     doc: docs/services/wafv2.md
     sources:

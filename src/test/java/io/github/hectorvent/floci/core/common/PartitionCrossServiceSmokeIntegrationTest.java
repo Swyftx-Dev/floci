@@ -47,7 +47,7 @@ class PartitionCrossServiceSmokeIntegrationTest {
             "lambdamicrovms", "lambdaweb", "memorydb", "msk", "mwaa", "networkfirewall", "oam", "opensearch", "organizations",
             "pipes", "ram", "rds", "redshift", "redshiftserverless", "resourceexplorer2", "resourcegroups", "route53resolver",
             "s3tables", "s3vectors", "sagemaker", "scheduler", "secretsmanager", "servicequotas", "ses", "sns", "sqs",
-            "stepfunctions", "timestreaminfluxdb", "transfer", "verifiedpermissions", "wafv2");
+            "stepfunctions", "timestreaminfluxdb", "transfer", "verifiedpermissions", "vpclattice", "wafv2");
 
     private static final String JSON_1_0 = "application/x-amz-json-1.0";
     private static final String JSON_1_1 = "application/x-amz-json-1.1";
@@ -760,6 +760,20 @@ class PartitionCrossServiceSmokeIntegrationTest {
             .contentType(JSON)
             .body("{\"Identifier\":\"" + arn + "\"}")
         .when().post("/DeleteSink"));
+        PartitionMatrix.assertArnIn(partitionCase, arn);
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void vpcLatticeServiceNetworkArn(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "vpc-lattice");
+        String arn = signed(region, "vpc-lattice")
+            .contentType(JSON)
+            .body("{\"name\":\"" + unique("smoke-sn", partitionCase) + "\"}")
+        .when().post("/servicenetworks").then().statusCode(201)
+            .extract().jsonPath().getString("arn");
+        cleanup.register(() -> signed(region, "vpc-lattice").when().delete("/servicenetworks/" + arn
+                .substring(arn.lastIndexOf('/') + 1)));
         PartitionMatrix.assertArnIn(partitionCase, arn);
     }
 

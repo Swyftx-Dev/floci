@@ -244,7 +244,7 @@ public class ElbV2HealthChecker implements Resettable {
         }
     }
 
-    static boolean matchesStatusCode(int code, String matcher) {
+    public static boolean matchesStatusCode(int code, String matcher) {
         String codeStr = String.valueOf(code);
         if (matcher.contains("-")) {
             String[] range = matcher.split("-", 2);

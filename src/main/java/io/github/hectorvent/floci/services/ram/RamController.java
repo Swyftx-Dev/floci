@@ -94,11 +94,14 @@ public class RamController {
         JsonNode request = readTree(body);
         String name = request.path("name").asText();
         boolean allowExternalPrincipals = request.path("allowExternalPrincipals").asBoolean(false);
+        Map<String, String> tags = new LinkedHashMap<>();
+        request.path("tags").forEach(tag -> tags.put(tag.path("key").asText(), tag.path("value").asText()));
         ResourceShare share = service.createResourceShare(
                 name,
                 stringList(request.path("principals")),
                 stringList(request.path("resourceArns")),
                 allowExternalPrincipals,
+                tags,
                 regionResolver.resolveRegion(headers),
                 regionResolver.getAccountId());
 

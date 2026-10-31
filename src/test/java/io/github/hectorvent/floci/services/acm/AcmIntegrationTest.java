@@ -375,6 +375,32 @@ class AcmIntegrationTest {
     }
 
     @Test
+    @Order(16)
+    void privateCertificateDescribesItsCertificateAuthority() {
+        String ca = "arn:aws:acm-pca:us-east-1:000000000000:certificate-authority/11111111-2222-3333-4444-666666666666";
+        String arn = given()
+            .header("X-Amz-Target", "CertificateManager.RequestCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("{\"DomainName\": \"ca.example.internal\", \"CertificateAuthorityArn\": \"" + ca + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("CertificateArn");
+
+        given()
+            .header("X-Amz-Target", "CertificateManager.DescribeCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("{\"CertificateArn\": \"" + arn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Certificate.CertificateAuthorityArn", equalTo(ca))
+            .body("Certificate.Type", equalTo("PRIVATE"));
+    }
+
+    @Test
     @Order(17)
     void ecCertificateKeepsItsKeyAlgorithmAndChainsToTheSameCa() throws Exception {
         JsonPath response = getCertificatePems(ecCertificateArn);

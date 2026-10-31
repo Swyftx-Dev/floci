@@ -208,6 +208,10 @@ aws elbv2 delete-target-group \
 
 Listener sockets bind on the Floci host. Expose any listener ports you need in Docker Compose when Floci itself runs in a container, similar to RDS and ElastiCache proxy ports.
 
+The socket on a listener port is shared with other data planes that listen on the same port, such
+as VPC Lattice: connections they claim by Host header or SNI name go to them, and every other
+connection reaches the load balancer unchanged, TLS included.
+
 ### Two load balancers on the same port
 
 In AWS each load balancer has its own DNS name and addresses, so two of them can both listen on

@@ -135,6 +135,8 @@ public class SharedHttpPorts {
         if (!certificate.equals(certificates.put(key, certificate))) {
             reloadCertificates();
         }
+        // Minting the default key takes seconds; a port with certificates expects TLS, so start it now.
+        ports.values().forEach(this::tlsServer);
     }
 
     public void removeCertificate(String key) {
@@ -161,7 +163,12 @@ public class SharedHttpPorts {
         return shared.plain.listen()
                 .compose(ignored -> shared.front.listen())
                 .<Void>mapEmpty()
-                .onSuccess(ignored -> LOG.infov("Shared HTTP port {0} started", String.valueOf(port)))
+                .onSuccess(ignored -> {
+                    LOG.infov("Shared HTTP port {0} started", String.valueOf(port));
+                    if (!certificates.isEmpty()) {
+                        tlsServer(shared);
+                    }
+                })
                 .onFailure(err -> {
                     synchronized (this) {
                         ports.remove(port, shared);

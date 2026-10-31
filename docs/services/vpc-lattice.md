@@ -101,6 +101,26 @@ ECS task containers are started with `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `RE
 and `AWS_CA_BUNDLE` pointing at a bundle that already contains it. HTTPS to a service on port 443
 then needs `FLOCI_TLS_AWS_HTTPS_PORT=0`, so the port is free for listeners.
 
+### From ECS tasks
+
+AWS answers a Lattice name with a link-local address in `169.254.171.0/24` inside a VPC, and
+outbound proxies (an envoy sidecar with an iptables init container redirecting that range to it)
+depend on that. Floci does the same for ECS tasks:
+
+- An `awsvpc` task runs in one shared network namespace (see
+  [ECS](ecs.md#awsvpc-task-network-namespace)), so the init container's iptables rules apply to the
+  application, and `linuxParameters.capabilities` grants it `NET_ADMIN`.
+- A query from a task's namespace for a service's generated name or custom domain is answered with
+  `169.254.171.1`. Every other client still gets Floci's own address.
+- The link-local proxy container on the task network (the one holding `169.254.170.2` for task-role
+  credentials) also holds `169.254.171.1` and relays its ports 80 and 443 to the Lattice listeners
+  on Floci. Task-role credentials keep working beside it: `169.254.170.2` is outside the redirected range.
+
+So an application calling `http://<custom-domain>/` through such a proxy reaches the target signed
+with the task role and over TLS on 443, and one calling `https://<custom-domain>/` itself reaches
+it directly. This needs `FLOCI_SERVICES_ECS_DOCKER_NETWORK` set and security-group enforcement
+off. Lattice listener ports other than 80 and 443 are not relayed on the link-local address.
+
 ### Auth
 
 A service whose `authType` is `AWS_IAM`, or that is associated with a service network whose

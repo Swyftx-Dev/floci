@@ -32,6 +32,7 @@ public class EcsTaskLinkLocalAddresses {
      * than somewhere unrelated in the range.
      */
     private static final int FIRST_THIRD_OCTET = 170;
+    private static final int LATTICE_THIRD_OCTET = 171;
 
     private final Map<String, Set<String>> takenByNetwork = new HashMap<>();
     private final Map<String, List<Allocation>> byTaskArn = new HashMap<>();
@@ -49,6 +50,10 @@ public class EcsTaskLinkLocalAddresses {
         // these sizes, and it keeps the addresses a person sees while debugging low and stable.
         for (int offset = 0; offset < 256; offset++) {
             int third = (FIRST_THIRD_OCTET + offset) % 256;
+            // VPC Lattice answers its service names from this /24, so no task may hold one of them.
+            if (third == LATTICE_THIRD_OCTET) {
+                continue;
+            }
             for (int fourth = 1; fourth <= 254; fourth++) {
                 String candidate = "169.254." + third + "." + fourth;
                 if (CREDENTIALS_ENDPOINT_ADDRESS.equals(candidate) || taken.contains(candidate)) {

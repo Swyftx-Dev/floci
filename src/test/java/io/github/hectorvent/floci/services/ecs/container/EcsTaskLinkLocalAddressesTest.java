@@ -7,6 +7,7 @@ import java.util.HashSet;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -29,6 +30,14 @@ class EcsTaskLinkLocalAddressesTest {
         Set<String> seen = new HashSet<>();
         for (int i = 0; i < 50; i++) {
             assertTrue(seen.add(addresses.allocate(NETWORK, TASK)), "handed out a duplicate at " + i);
+        }
+    }
+
+    @Test
+    void neverHandsOutAnAddressInTheLatticeRange() {
+        for (int i = 0; i < 600; i++) {
+            String address = addresses.allocate(NETWORK, TASK);
+            assertFalse(address.startsWith("169.254.171."), "handed out Lattice address " + address);
         }
     }
 

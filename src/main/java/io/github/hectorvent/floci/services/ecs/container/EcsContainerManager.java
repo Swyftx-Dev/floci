@@ -27,6 +27,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
+import io.github.hectorvent.floci.core.common.docker.LocallyBuiltHelperImage;
 import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.SecurityGroupFirewallManager;
@@ -66,6 +67,7 @@ import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
+import io.github.hectorvent.floci.services.vpclattice.VpcLatticeLinkLocalDns;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -148,6 +150,8 @@ public class EcsContainerManager {
     private final EcsCredentialsProxy credentialsProxy;
     private final EcsTaskLinkLocalAddresses linkLocalAddresses;
     private final EfsService efsService;
+    private final VpcLatticeLinkLocalDns latticeDns;
+    private final Map<String, Sandbox> sandboxes = new ConcurrentHashMap<>();
     // Stamped as RUN_LABEL on every container this process creates, so a sweep can tell its own apart.
     private final String runId = UUID.randomUUID().toString();
     // A sweep failure is retried before each task launch; each distinct failure is a WARN once.
@@ -174,7 +178,8 @@ public class EcsContainerManager {
                                EcsTaskRoleCredentials taskRoleCredentials,
                                EcsCredentialsProxy credentialsProxy,
                                EcsTaskLinkLocalAddresses linkLocalAddresses,
-                               EfsService efsService) {
+                               EfsService efsService,
+                               VpcLatticeLinkLocalDns latticeDns) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -193,6 +198,7 @@ public class EcsContainerManager {
         this.credentialsProxy = credentialsProxy;
         this.linkLocalAddresses = linkLocalAddresses;
         this.efsService = efsService;
+        this.latticeDns = latticeDns;
     }
 
     public EcsContainerManager(ContainerBuilder containerBuilder,
@@ -214,7 +220,7 @@ public class EcsContainerManager {
                                EcsTaskLinkLocalAddresses linkLocalAddresses) {
         this(containerBuilder, lifecycleManager, logStreamer, containerDetector, config, regionResolver,
                 awsEnv, ssmService, secretsManagerService, s3Service, ecrRegistryManager, hostVolumePolicy,
-                ec2Service, firewallManager, taskRoleCredentials, credentialsProxy, linkLocalAddresses, null);
+                ec2Service, firewallManager, taskRoleCredentials, credentialsProxy, linkLocalAddresses, null, null);
     }
 
     public EcsContainerManager(ContainerBuilder containerBuilder,
@@ -375,7 +381,10 @@ public class EcsContainerManager {
                 ? taskDef.getNetworkMode().name()
                 : NetworkMode.bridge.name();
 
+        String sandboxId = null;
         try {
+            sandboxId = startTaskSandbox(task, taskDef, taskId, region, protectedNetwork, taskRoleEndpoint);
+            String namespaceOwnerId = protectedNetwork != null ? protectedNetwork.namespace().helperId() : sandboxId;
             for (ContainerDefinition def : launchOrder) {
                 awaitDependencies(def, containerIds);
                 String containerName = ContainerStorageHelper.dockerName(config, "ecs-" + taskId + "-" + def.getName());
@@ -411,14 +420,15 @@ public class EcsContainerManager {
                         .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                                 "ecs", taskId, regionResolver.getAccountId(), region))
                         .withLabels(ownerLabels());
+                if (namespaceOwnerId != null) {
+                    specBuilder.withNetworkMode("container:" + namespaceOwnerId);
+                }
                 if (protectedNetwork != null) {
-                    specBuilder.withNetworkMode("container:" + protectedNetwork.namespace().helperId());
                     specBuilder.withLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_WORKLOAD_LABEL, "true"));
                 }
                 // Its own address in the credential endpoint's range, so this container has a
-                // connected route to 169.254.170.2 at all. One per container, not per task: each
-                // has its own network namespace and so its own routing table.
-                if (taskRoleEndpoint.vending()) {
+                // connected route to 169.254.170.2 at all. A sandboxed task's namespace already has one.
+                if (taskRoleEndpoint.vending() && namespaceOwnerId == null) {
                     specBuilder.withLinkLocalIp(
                             linkLocalAddresses.allocate(taskRoleEndpoint.network(), task.getTaskArn()));
                 }
@@ -473,7 +483,7 @@ public class EcsContainerManager {
 
                 // Stable publishing serves existing host clients; dynamic publishing lets
                 // tasks sharing an awsvpc container port coexist on the Docker host.
-                if (protectedNetwork == null && def.getPortMappings() != null) {
+                if (namespaceOwnerId == null && def.getPortMappings() != null) {
                     boolean awsvpc = taskDef.getNetworkMode() == NetworkMode.awsvpc;
                     boolean publishAwsvpcPorts = awsvpc && config.services().ecs().publishAwsvpcPortsToHost();
                     boolean publishToHost = !containerDetector.isRunningInContainer()
@@ -572,7 +582,8 @@ public class EcsContainerManager {
                         lifecycleManager.removeIfExists(dockerId);
                         throw e;
                     }
-                    fluentHost = inspectContainerIp(dockerId);
+                    // A shared namespace reaches the router on loopback, as an awsvpc task does on AWS.
+                    fluentHost = sandboxId != null ? "127.0.0.1" : inspectContainerIp(dockerId);
                 } else {
                     ContainerInfo info = lifecycleManager.createAndStartEphemeral(spec, platform);
                     dockerId = info.containerId();
@@ -584,7 +595,7 @@ public class EcsContainerManager {
 
                 // Resolve network bindings for ECS-specific model
                 List<NetworkBinding> networkBindings = resolveNetworkBindings(
-                        protectedNetwork == null ? dockerId : protectedNetwork.namespace().helperId(), def);
+                        namespaceOwnerId == null ? dockerId : namespaceOwnerId, def);
 
                 // Build ECS container model
                 Container container = buildContainer(task.getTaskArn(), def, dockerId, networkBindings, region,
@@ -656,6 +667,74 @@ public class EcsContainerManager {
                 firelensVolumeName,
                 protectedNetwork == null ? null : protectedNetwork.eni().getNetworkInterfaceId(), region,
                 stopTimeouts, taskVolumeNames);
+    }
+
+    /**
+     * The task's network namespace for an awsvpc task, as the ECS agent's pause container is: every
+     * container joins it, so they share localhost, iptables rules and the task's link-local address.
+     */
+    private String startTaskSandbox(EcsTask task, TaskDefinition taskDef, String taskId, String region,
+                                    PreparedNetwork protectedNetwork, TaskRoleCredentialEndpoint endpoint) {
+        if (taskDef.getNetworkMode() != NetworkMode.awsvpc || protectedNetwork != null
+                || linkLocalAddresses == null || credentialsProxy == null) {
+            return null;
+        }
+        Optional<String> network = containerBuilder.resolveDockerNetwork(config.services().ecs().dockerNetwork());
+        if (network.isEmpty()) {
+            return null;
+        }
+        boolean lattice = credentialsProxy.relaysLattice();
+        if (lattice) {
+            credentialsProxy.ensureProxyOn(network.get());
+        }
+        String image = config.services().ecs().taskRoleCredentials().proxyImage();
+        LocallyBuiltHelperImage.ensureBuilt(lifecycleManager.getDockerClient(), containerBuilder, image,
+                "floci/network-helper:local", "/docker/network-helper.Dockerfile");
+        ContainerBuilder.Builder builder = containerBuilder.newContainer(image)
+                .withName(sandboxName(taskId))
+                .withDockerNetwork(network)
+                .withHostDockerInternalOnLinux()
+                .withEmbeddedDns()
+                .withCmd(List.of("sleep", "2147483647"))
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "ecs", taskId, regionResolver.getAccountId(), region))
+                .withLabels(ownerLabels());
+        if (endpoint.vending() || lattice) {
+            builder.withLinkLocalIp(linkLocalAddresses.allocate(network.get(), task.getTaskArn()));
+        }
+        String bindAddress = hostPortBindAddress();
+        namespacePortBindings(taskDef, containerDetector.isRunningInContainer(),
+                config.services().ecs().publishAwsvpcPortsToHost(), config.services().ecs().dynamicAwsvpcHostPorts())
+                .forEach((containerPort, hostPort) -> builder.withPortBinding(containerPort, hostPort, bindAddress));
+        String sandboxId = lifecycleManager.createAndStart(builder.build()).containerId();
+        // Recorded before anything else can fail, so the task's teardown always removes it.
+        sandboxes.put(task.getTaskArn(), new Sandbox(sandboxId, null));
+        String address = inspectContainerIp(sandboxId);
+        sandboxes.put(task.getTaskArn(), new Sandbox(sandboxId, address));
+        if (address != null && latticeDns != null) {
+            latticeDns.register(address);
+        }
+        return sandboxId;
+    }
+
+    /** Removes a task's sandbox once its containers are gone; true when there is none left. */
+    private boolean removeTaskSandbox(String taskArn) {
+        Sandbox sandbox = sandboxes.get(taskArn);
+        if (sandbox == null) {
+            return true;
+        }
+        if (!stopAndConfirmRemoved(sandbox.containerId())) {
+            return false;
+        }
+        sandboxes.remove(taskArn);
+        if (sandbox.address() != null && latticeDns != null) {
+            latticeDns.unregister(sandbox.address());
+        }
+        return true;
+    }
+
+    private String sandboxName(String taskId) {
+        return ContainerStorageHelper.dockerName(config, "ecs-" + taskId + "-internal-ecs-pause");
     }
 
     private String taskVolumeName(EcsTask task, Volume volume) {
@@ -1429,6 +1508,9 @@ public class EcsContainerManager {
 
     private record PreparedNetwork(NetworkInterface eni, SecurityGroupFirewallManager.Namespace namespace) {}
 
+    /** A task's sandbox container, and the address its DNS queries come from. */
+    private record Sandbox(String containerId, String address) {}
+
     /**
      * Stops and removes all Docker containers for a task.
      */
@@ -1453,6 +1535,7 @@ public class EcsContainerManager {
             }
         }
         cleanupProtectedNetwork(handle);
+        allRemoved &= removeTaskSandbox(handle.getTaskArn());
         new ArrayList<>(handle.getLogStreamsByContainerId().keySet())
                 .forEach(dockerId -> finalizeLogStream(handle, dockerId));
         revokeTaskRoleCredentials(handle.getTaskArn());
@@ -1546,7 +1629,7 @@ public class EcsContainerManager {
         // A force removal terminates Docker's follow-log transport even when the preceding stop failed.
         // Preserve handles for any container that still may be running after both operations failed.
         terminatedContainerIds.forEach(dockerId -> finalizeLogStream(handle, dockerId));
-        if (handle.allContainersRemoved()) {
+        if (handle.allContainersRemoved() && removeTaskSandbox(handle.getTaskArn())) {
             cleanupProtectedNetwork(handle);
             removeTaskVolumes(handle);
             // Only now: a container that survived a failed removal still holds its address.

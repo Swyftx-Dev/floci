@@ -218,6 +218,19 @@ class MskServiceTest {
     }
 
     @Test
+    void restorePersistedRuntimeRestartsTheBrokerOfEveryPersistedCluster() {
+        MskCluster cluster = mskService.createCluster("restored-cluster");
+        when(config.services().msk().mock()).thenReturn(false);
+        when(redpandaManager.tryStartContainer(Mockito.any())).thenReturn(true);
+
+        mskService.restorePersistedRuntime();
+
+        Mockito.verify(redpandaManager).tryStartContainer(Mockito.argThat(
+                c -> c.getClusterArn().equals(cluster.getClusterArn())));
+        assertEquals(ClusterState.CREATING, mskService.describeCluster(cluster.getClusterArn()).getState());
+    }
+
+    @Test
     void createClusterWithoutDockerDaemonStillReachesActive() {
         // tryStartContainer() returns false when no Docker daemon is reachable. The cluster
         // record is metadata, so the create still succeeds, reaches ACTIVE, and reports a

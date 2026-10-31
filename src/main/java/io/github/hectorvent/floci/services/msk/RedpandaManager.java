@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
@@ -270,6 +271,45 @@ public class RedpandaManager {
 
         specBuilder.withCmd(cmd);
         return specBuilder.build();
+    }
+
+    /**
+     * Runs {@code rpk} in the cluster's broker, for the topic operations MSK exposes over its API.
+     * A broker of one node holds one replica of everything, whatever factor was asked for. A broker
+     * that is missing or does not answer is MSK's ClusterConnectivityException, and a refused
+     * command its KafkaRequestException carrying rpk's output.
+     */
+    public void rpk(MskCluster cluster, List<String> args) {
+        if (cluster.getContainerId() == null) {
+            throw new AwsException("ClusterConnectivityException",
+                    "Cluster " + cluster.getClusterName() + " has no running broker.", 409);
+        }
+        ContainerExec.Result result = exec(cluster, args);
+        if (result.timedOut()) {
+            throw new AwsException("ClusterConnectivityException",
+                    "The broker of cluster " + cluster.getClusterName() + " did not answer in time.", 409);
+        }
+        if (result.exitCode() != 0) {
+            throw new AwsException("KafkaRequestException", result.stdout().strip(), 400);
+        }
+    }
+
+    /** As {@link #rpk}, for a restore that expects most of what it asks for to exist already. */
+    public void rpkQuietly(MskCluster cluster, List<String> args) {
+        if (cluster.getContainerId() == null) {
+            return;
+        }
+        ContainerExec.Result result = exec(cluster, args);
+        LOG.debugv("rpk {0} on MSK cluster {1}: {2}", String.join(" ", args), cluster.getClusterName(),
+                result.stdout());
+    }
+
+    private ContainerExec.Result exec(MskCluster cluster, List<String> args) {
+        List<String> cmd = new ArrayList<>();
+        cmd.add("rpk");
+        cmd.addAll(args);
+        return ContainerExec.runMerged(lifecycleManager.getDockerClient(), cluster.getContainerId(),
+                cmd.toArray(String[]::new), 30);
     }
 
     public boolean isReady(MskCluster cluster) {

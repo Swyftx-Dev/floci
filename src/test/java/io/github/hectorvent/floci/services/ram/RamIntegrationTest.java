@@ -703,6 +703,40 @@ class RamIntegrationTest {
     }
 
     @Test
+    @Order(2)
+    void createResourceShareKeepsItsTags() {
+        String shareArn =
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                    {
+                        "name": "tagged-share",
+                        "principals": ["111111111111"],
+                        "tags": [{"key": "Name", "value": "tagged-share"}]
+                    }
+                    """)
+            .when()
+                .post("/createresourceshare")
+            .then()
+                .statusCode(200)
+                .body("resourceShare.tags[0].key", equalTo("Name"))
+            .extract().path("resourceShare.resourceShareArn");
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                { "resourceOwner": "SELF", "resourceShareArns": ["%s"] }
+                """.formatted(shareArn))
+        .when()
+            .post("/getresourceshares")
+        .then()
+            .statusCode(200)
+            .body("resourceShares[0].tags[0].value", equalTo("tagged-share"));
+    }
+
+    @Test
     @Order(3)
     void acceptResourceShareInvitationOverHttp() {
         // A bare account-id principal (not an OU/organization ARN) gets a real PENDING
